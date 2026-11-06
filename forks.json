@@ -10,6 +10,7 @@
       "release_exclude": "(?i)experimental|dont use",
       "include": "windows-x86_64.*\\.zip$",
       "exclude": "pgo",
+      "pgo": true,
       "exe": "eglantine.exe",
       "aliases": ["Djihads80"],
       "wichforks_id": "eglantine-upstream"
@@ -21,6 +22,7 @@
       "repo": "zortos293/Lichii",
       "include": "windows-x86_64.*\\.zip$",
       "exclude": "pgo",
+      "pgo": true,
       "exe": "lichii.exe",
       "aliases": ["Lichii"],
       "wichforks_id": "lichii"
@@ -34,6 +36,7 @@
       "branch": null,
       "include": "^lichii-windows-x86_64-",
       "exclude": "pgo",
+      "pgo": true,
       "exe": "lichii.exe",
       "aliases": [],
       "wichforks_id": "lichii"
@@ -56,6 +59,7 @@
       "repo": "MythosOfs/Orchid",
       "include": "windows-x86_64.*\\.zip$",
       "exclude": "pgo",
+      "pgo": true,
       "exe": "orchid.exe",
       "aliases": ["Orchid"],
       "wichforks_id": "orchid"
@@ -90,6 +94,7 @@
       "repo": "SmileyTatsu/Eglantine",
       "include": "windows-x86_64.*\\.zip$",
       "exclude": "pgo",
+      "pgo": true,
       "exe": "eglantine.exe",
       "aliases": ["SmileyTatsu"],
       "wichforks_id": "smileytatsu-eglantine"
@@ -111,6 +116,7 @@
       "repo": "rdenno/Eglantine",
       "include": "windows-x86_64.*\\.zip$",
       "exclude": "pgo",
+      "pgo": true,
       "aliases": ["rdenno"],
       "wichforks_id": "rdenno-eglantine"
     },

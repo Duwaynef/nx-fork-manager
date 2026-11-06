@@ -65,6 +65,7 @@ function Get-Config {
             gpu                    = Get-DetectedGpu
             install_dir            = 'forks'
             check_interval_minutes = 60
+            build_type             = 'msvc'
             zip_backups            = 0
         }
         Write-JsonFile $script:ConfigFile $cfg
@@ -74,7 +75,42 @@ function Get-Config {
     return $cfg
 }
 
+# config.json "build_type": msvc (standard builds, default), pgo (PGO builds), or both.
+function Get-BuildType {
+    $p = $script:Config.PSObject.Properties['build_type']
+    if (-not $p -or -not $p.Value) { return 'msvc' }
+    $v = ([string]$p.Value).Trim().ToLower()
+    if (@('msvc', 'pgo', 'both') -notcontains $v) {
+        Write-Warning "config.json: build_type must be msvc, pgo or both (found ""$v""). Using msvc."
+        return 'msvc'
+    }
+    return $v
+}
+
+function Get-BuildTypeLabel {
+    switch (Get-BuildType) {
+        'pgo' { return 'PGO' }
+        'both' { return 'MSVC and PGO' }
+        default { return 'MSVC' }
+    }
+}
+
+# The PGO build of a fork is a separate entry with its own id ("<id>-pgo"), install folder, state and checks.
+function New-PgoVariant($F) {
+    $v = $F | Select-Object -Property *
+    Set-Prop $v 'id' "$($F.id)-pgo"
+    Set-Prop $v 'name' "$($F.name) (PGO)"
+    if ($F.pgo_include) { Set-Prop $v 'include' $F.pgo_include }
+    # The standard entry excludes "pgo"; the PGO entry keeps the other exclusions only.
+    $parts = @(([string]$F.exclude) -split '\|' | Where-Object { $_ -and $_ -ine 'pgo' })
+    Set-Prop $v 'exclude' $(if ($parts.Count) { $parts -join '|' } else { $null })
+    Set-Prop $v 'variant' 'pgo'
+    Set-Prop $v 'base_id' $F.id
+    return $v
+}
+
 # forks.json ships with the tool. my-forks.json holds the forks you add, so updating the tool never touches them.
+# $script:AllForks holds every entry (MSVC and PGO); $script:Catalog.forks only the ones build_type shows.
 function Import-Catalog {
     $catalog = [IO.File]::ReadAllText((Join-Path $script:Here 'forks.json')) | ConvertFrom-Json
     $mine = Read-JsonFile $script:MyForksFile
@@ -83,12 +119,42 @@ function Import-Catalog {
         $catalog.forks = @($catalog.forks) + @($mine.forks)
         $script:CustomIds = @($mine.forks | ForEach-Object { $_.id })
     }
+    $mode = Get-BuildType
+    $all = New-Object Collections.ArrayList
+    $visible = New-Object Collections.ArrayList
+    foreach ($f in $catalog.forks) {
+        Set-Prop $f 'variant' 'msvc'
+        Set-Prop $f 'base_id' $f.id
+        [void]$all.Add($f)
+        # A fork without PGO builds stays visible in every mode.
+        if ($mode -ne 'pgo' -or -not $f.pgo) { [void]$visible.Add($f) }
+        if ($f.pgo) {
+            $v = New-PgoVariant $f
+            [void]$all.Add($v)
+            if ($mode -ne 'msvc') { [void]$visible.Add($v) }
+        }
+    }
+    $script:AllForks = $all.ToArray()
+    $catalog.forks = $visible.ToArray()
     return $catalog
 }
 
+function Set-BuildType([string]$Value) {
+    $v = switch ($Value.Trim().ToLower()) {
+        { $_ -in 'm', 'msvc' } { 'msvc' }
+        { $_ -in 'p', 'pgo' } { 'pgo' }
+        { $_ -in 'b', 'both' } { 'both' }
+        default { throw 'Type m (MSVC), p (PGO) or b (both).' }
+    }
+    Set-Prop $script:Config 'build_type' $v
+    Write-JsonFile $script:ConfigFile $script:Config
+    $script:Catalog = Import-Catalog
+    Write-Host "Build type: $(Get-BuildTypeLabel)."
+}
+
 New-Item -ItemType Directory -Force -Path $script:DataDir | Out-Null
-$script:Catalog = Import-Catalog
 $script:Config = Get-Config
+$script:Catalog = Import-Catalog
 $script:ForksDir = if ([IO.Path]::IsPathRooted([string]$script:Config.install_dir)) { [string]$script:Config.install_dir }
 else { Join-Path $script:Here ([string]$script:Config.install_dir) }
 $script:ForksDir = [IO.Path]::GetFullPath($script:ForksDir)
@@ -272,20 +338,37 @@ function Test-Installed($State, $F) {
 }
 
 function Get-ForkById([string]$Id) {
-    $f = $script:Catalog.forks | Where-Object { $_.id -eq $Id }
-    if (-not $f) { throw "Unknown fork: $Id. Known: $(($script:Catalog.forks | ForEach-Object id) -join ', ')" }
+    $f = $script:AllForks | Where-Object { $_.id -eq $Id }
+    if (-not $f) { throw "Unknown fork: $Id. Known: $(($script:AllForks | ForEach-Object id) -join ', ')" }
     return $f
 }
 
-function Get-ForkByNumber([string]$Number) {
-    $i = [int]$Number
-    if ($i -lt 1 -or $i -gt @($script:Catalog.forks).Count) { throw "No fork number $Number." }
-    return @($script:Catalog.forks)[$i - 1]
+# Installed builds that build_type hides, for example MSVC builds while PGO is selected. They get no updates.
+function Get-HiddenInstalled($State) {
+    $shown = @($script:Catalog.forks | ForEach-Object { $_.id })
+    return @($script:AllForks | Where-Object { $shown -notcontains $_.id -and (Test-Installed $State $_) })
 }
 
-# Updates touch installed forks only. A fork is installed the first time you open it.
+# Menu numbers: the forks of the selected build type first, then the hidden installed builds.
+function Get-MenuForks {
+    return @($script:Catalog.forks) + @(Get-HiddenInstalled (Get-State))
+}
+
+function Get-ForkByNumber([string]$Number) {
+    $list = @(Get-MenuForks)
+    $i = [int]$Number
+    if ($i -lt 1 -or $i -gt $list.Count) { throw "No fork number $Number." }
+    return $list[$i - 1]
+}
+
+function Get-VariantLabel($F) { if ($F.variant -eq 'pgo') { return 'PGO' } return 'MSVC' }
+
+# Updates touch forks you use only. A fork is installed the first time you open it.
+# Once any build of a fork (MSVC or PGO) is installed, every build that build_type shows is kept
+# up to date, so switching to "both" or "pgo" downloads the missing build on the next update.
 function Get-InstalledForks($State) {
-    return @($script:Catalog.forks | Where-Object { Test-Installed $State $_ })
+    $used = @($script:AllForks | Where-Object { Test-Installed $State $_ } | ForEach-Object { $_.base_id })
+    return @($script:Catalog.forks | Where-Object { $used -contains $_.base_id })
 }
 
 # --- releases ------------------------------------------------------------------------------------
@@ -319,9 +402,18 @@ function Get-Releases($F) {
     return @($list | Sort-Object date -Descending)
 }
 
+# A PGO entry takes only names with "pgo"; a standard (MSVC) entry never takes them.
+function Test-AssetMatch($F, [string]$Name) {
+    if ($Name -notmatch $F.include) { return $false }
+    if ($F.exclude -and $Name -match $F.exclude) { return $false }
+    $isPgo = $Name -match '(?i)pgo'
+    if ($F.variant -eq 'pgo') { return $isPgo }
+    return -not $isPgo
+}
+
 function Find-Asset($F, $Release) {
     foreach ($a in $Release.assets) {
-        if ($a.name -match $F.include -and -not ($F.exclude -and $a.name -match $F.exclude)) { return $a }
+        if (Test-AssetMatch $F $a.name) { return $a }
     }
     return $null
 }
@@ -338,7 +430,7 @@ function Get-ActionsInfo($F, [string]$Wanted) {
         $artifacts = (Get-JsonUrl "https://api.github.com/repos/$($F.repo)/actions/runs/$($run.id)/artifacts?per_page=50").artifacts
         foreach ($a in $artifacts) {
             if ($a.expired) { continue }
-            if ($a.name -notmatch $F.include -or ($F.exclude -and $a.name -match $F.exclude)) { continue }
+            if (-not (Test-AssetMatch $F $a.name)) { continue }
             $download = if ($env:GITHUB_TOKEN) { "https://api.github.com/repos/$($F.repo)/actions/artifacts/$($a.id)/zip" }
             else { "https://nightly.link/$($F.repo)/actions/artifacts/$($a.id).zip" }
             $release = [pscustomobject]@{
@@ -851,7 +943,7 @@ function Select-WindowsAsset($Assets, [bool]$Artifact) {
 }
 
 function Get-FreeForkId([string[]]$Choices) {
-    $taken = @($script:Catalog.forks | ForEach-Object { $_.id })
+    $taken = @($script:AllForks | ForEach-Object { $_.id })
     foreach ($c in $Choices) { if ($taken -notcontains $c) { return $c } }
     for ($i = 2; ; $i++) { if ($taken -notcontains "$($Choices[-1])-$i") { return "$($Choices[-1])-$i" } }
 }
@@ -887,21 +979,23 @@ function New-ForkFromUrl([string]$Link) {
     }
     $f = [pscustomobject]$f
 
-    $same = @($script:Catalog.forks | Where-Object {
-            $_.repo -ieq $repo -and $_.source -eq $f.source -and ($f.source -ne 'actions' -or $_.workflow -eq $f.workflow)
+    $same = @($script:AllForks | Where-Object {
+            $_.variant -ne 'pgo' -and $_.repo -ieq $repo -and $_.source -eq $f.source -and ($f.source -ne 'actions' -or $_.workflow -eq $f.workflow)
         })
     if ($same.Count) { throw "This fork is already in the list: $($same[0].name) (id $($same[0].id))." }
 
-    # Find the Windows build and turn its name into a rule for future builds.
+    # Find the Windows builds (standard and PGO) and turn their names into rules for future builds.
     $asset = $null
+    $pgoAsset = $null
     if ($f.source -eq 'actions') {
         $runs = (Get-JsonUrl "https://api.github.com/repos/$repo/actions/workflows/$($f.workflow)/runs?status=success&per_page=5").workflow_runs
         foreach ($run in $runs) {
             $arts = @((Get-JsonUrl "https://api.github.com/repos/$repo/actions/runs/$($run.id)/artifacts?per_page=50").artifacts | Where-Object { -not $_.expired })
-            $asset = Select-WindowsAsset $arts $true
-            if ($asset) { break }
+            $asset = Select-WindowsAsset @($arts | Where-Object { $_.name -notmatch '(?i)pgo' }) $true
+            $pgoAsset = Select-WindowsAsset @($arts | Where-Object { $_.name -match '(?i)pgo' }) $true
+            if ($asset -or $pgoAsset) { break }
         }
-        if (-not $asset) { throw "No recent successful run of $($f.workflow) has a Windows artifact." }
+        if (-not $asset -and -not $pgoAsset) { throw "No recent successful run of $($f.workflow) has a Windows artifact." }
     }
     else {
         try { $releases = Get-Releases $f }
@@ -910,16 +1004,20 @@ function New-ForkFromUrl([string]$Link) {
             throw
         }
         foreach ($r in $releases) {
-            $asset = Select-WindowsAsset $r.assets $false
-            if ($asset) { break }
+            $asset = Select-WindowsAsset @($r.assets | Where-Object { $_.name -notmatch '(?i)pgo' }) $false
+            $pgoAsset = Select-WindowsAsset @($r.assets | Where-Object { $_.name -match '(?i)pgo' }) $false
+            if ($asset -or $pgoAsset) { break }
         }
-        if (-not $asset) {
+        if (-not $asset -and -not $pgoAsset) {
             $hint = if ($f.source -eq 'github') { ' If it only publishes GitHub Actions builds, paste the workflow link instead (https://github.com/owner/repo/actions/workflows/<file>.yml).' } else { '' }
             throw "No release of $repo has a Windows .zip.$hint"
         }
     }
-    Set-Prop $f 'include' (ConvertTo-NamePattern ([string]$asset.name))
+    $mainAsset = if ($asset) { $asset } else { $pgoAsset }
+    Set-Prop $f 'include' (ConvertTo-NamePattern ([string]$mainAsset.name))
     Set-Prop $f 'exclude' $null
+    Set-Prop $f 'pgo' ([bool]$pgoAsset)
+    Set-Prop $f 'pgo_include' $(if ($pgoAsset) { ConvertTo-NamePattern ([string]$pgoAsset.name) } else { $null })
 
     # The guide lists many forks: reuse its name and id, so the GPU filter and game table know this fork.
     $guide = Read-JsonFile (Join-Path $script:CacheDir 'forks.json')
@@ -942,9 +1040,16 @@ function New-ForkFromUrl([string]$Link) {
     Set-Prop $f 'aliases' @($aliases)
     Set-Prop $f 'wichforks_id' $(if ($known) { [string]$known.id } else { $null })
 
-    # Prove the rule finds the same build before saving it.
-    $latest = Get-LatestInfo $f ''
-    return [pscustomobject]@{ fork = $f; latest = $latest }
+    # Prove the rules find the same builds before saving them.
+    $latest = $null
+    $pgoLatest = $null
+    if ($asset) { $latest = Get-LatestInfo $f '' }
+    if ($pgoAsset) {
+        $probe = $f | Select-Object -Property *
+        Set-Prop $probe 'variant' 'msvc'
+        $pgoLatest = Get-LatestInfo (New-PgoVariant $probe) ''
+    }
+    return [pscustomobject]@{ fork = $f; latest = $latest; pgoLatest = $pgoLatest }
 }
 
 function Add-CustomFork([string]$Link) {
@@ -954,29 +1059,98 @@ function Add-CustomFork([string]$Link) {
     $mine.forks = @($mine.forks) + @($result.fork)
     Write-JsonFile $script:MyForksFile $mine
     $script:Catalog = Import-Catalog
-    $number = @($script:Catalog.forks).Count
-    Write-Host "Added $($result.fork.name) as fork $number (id $($result.fork.id))."
-    Write-Host "  Latest build: $($result.latest.release.tag), file $($result.latest.asset.name)."
-    Write-Host "  File rule: $($result.fork.include)  (edit my-forks.json to change it)"
-    return $result.fork
+    $forks = @($script:Catalog.forks)
+    $shown = $null
+    for ($i = 0; $i -lt $forks.Count; $i++) {
+        if ($forks[$i].base_id -eq $result.fork.id) {
+            if (-not $shown) { $shown = $forks[$i] }
+            Write-Host "Added $($forks[$i].name) as fork $($i + 1) (id $($forks[$i].id))."
+        }
+    }
+    if ($result.latest) {
+        Write-Host "  Latest build: $($result.latest.release.tag), file $($result.latest.asset.name)."
+        Write-Host "  File rule: $($result.fork.include)  (edit my-forks.json to change it)"
+    }
+    else { Write-Host '  No standard (MSVC) Windows build, only PGO.' }
+    if ($result.pgoLatest) {
+        Write-Host "  Latest PGO build: $($result.pgoLatest.release.tag), file $($result.pgoLatest.asset.name)."
+        Write-Host "  PGO file rule: $($result.fork.pgo_include)"
+        if ((Get-BuildType) -eq 'msvc') { Write-Host '  It also has PGO builds: press v in the menu to show them.' }
+    }
+    if (-not $shown) { $shown = Get-ForkById $result.fork.id }
+    return $shown
 }
 
 # Removes a fork you added, with its installed files. Forks that ship with the tool stay.
+# Removing either the MSVC or the PGO entry removes the fork with both builds.
 function Remove-CustomFork($F) {
-    if ($script:CustomIds -notcontains $F.id) { throw "$($F.name) ships with the tool and cannot be removed here. Just do not open it: forks you never open use no disk space." }
+    $baseId = $F.base_id
+    if ($script:CustomIds -notcontains $baseId) { throw "$($F.name) ships with the tool and cannot be removed here. Just do not open it: forks you never open use no disk space." }
+    $entries = @($script:AllForks | Where-Object { $_.base_id -eq $baseId })
+    foreach ($e in $entries) {
+        $running = @(Get-RunningUnder (Get-ForkDir $e.id))
+        if ($running.Count) { throw "$($e.name) is running ($($running[0].Name)). Close it and try again." }
+    }
+    $state = Get-State
+    foreach ($e in $entries) {
+        Remove-Managed (Get-ForkDir $e.id)
+        Remove-Managed (Get-PrevForkDir $e.id)
+        Remove-Managed (Get-ZipForkDir $e.id)
+        if ($state.PSObject.Properties[$e.id]) { $state.PSObject.Properties.Remove($e.id) }
+    }
+    Write-JsonFile $script:StateFile $state
+    $mine = Read-JsonFile $script:MyForksFile
+    $mine.forks = @($mine.forks | Where-Object { $_.id -ne $baseId })
+    Write-JsonFile $script:MyForksFile $mine
+    $script:Catalog = Import-Catalog
+    Write-Host "Removed $($entries[0].name) and its installed files."
+}
+
+# Deletes one installed build (current and previous version). The fork stays in the list.
+function Remove-Build($F) {
     $dest = Get-ForkDir $F.id
     $running = @(Get-RunningUnder $dest)
     if ($running.Count) { throw "$($F.name) is running ($($running[0].Name)). Close it and try again." }
     Remove-Managed $dest
     Remove-Managed (Get-PrevForkDir $F.id)
-    Remove-Managed (Get-ZipForkDir $F.id)
+    # Zip backups stay: they are what you reinstall from.
     $state = Get-State
-    if ($state.PSObject.Properties[$F.id]) { $state.PSObject.Properties.Remove($F.id); Write-JsonFile $script:StateFile $state }
-    $mine = Read-JsonFile $script:MyForksFile
-    $mine.forks = @($mine.forks | Where-Object { $_.id -ne $F.id })
-    Write-JsonFile $script:MyForksFile $mine
-    $script:Catalog = Import-Catalog
-    Write-Host "Removed $($F.name) and its installed files."
+    if ($state.PSObject.Properties[$F.id]) {
+        $state.PSObject.Properties.Remove($F.id)
+        Write-JsonFile $script:StateFile $state
+    }
+    Write-Host "Removed the installed files of $($F.name)."
+}
+
+# After a build type change: offers to download the newly selected builds, then to remove the builds
+# no longer selected. A build is removed only when the fork has a selected build installed, because
+# a fork with nothing installed is no longer updated.
+function Switch-BuildType([string]$Value) {
+    Set-BuildType $Value
+    $state = Get-State
+    $missing = @(Get-InstalledForks $state | Where-Object { -not (Test-Installed $state $_) })
+    if ($missing.Count) {
+        Write-Host "Not installed yet for the forks you use: $(($missing | ForEach-Object name) -join ', ')."
+        if ((Read-Host 'Download them now? (y/n)').Trim().ToLower() -eq 'y') { [void](Update-Forks $missing) }
+        else { Write-Host 'They download on the next update (u).' }
+    }
+    $state = Get-State
+    $hidden = @(Get-HiddenInstalled $state)
+    if ($hidden.Count) {
+        $types = @($hidden | ForEach-Object { Get-VariantLabel $_ } | Select-Object -Unique) -join ' and '
+        Write-Host "$types builds still installed: $(($hidden | ForEach-Object name) -join ', ')."
+        if ((Read-Host "Remove these $types builds? (y/n)").Trim().ToLower() -eq 'y') {
+            foreach ($h in $hidden) {
+                $replacement = @($script:Catalog.forks | Where-Object { $_.base_id -eq $h.base_id -and (Test-Installed $state $_) })
+                if (-not $replacement.Count) {
+                    Write-Host "Kept $($h.name): its $(Get-BuildTypeLabel) build is not installed yet. Remove it later with d<number>."
+                    continue
+                }
+                try { Remove-Build $h } catch { Write-Warning $_.Exception.Message }
+            }
+        }
+        else { Write-Host 'They stay in the list under their own heading. Remove one later with d<number>.' }
+    }
 }
 
 # --- open and menu -------------------------------------------------------------------------------
@@ -1008,10 +1182,10 @@ function Set-Pin($F, [bool]$Value) {
 function Show-Status {
     $state = Get-State
     Write-Host ''
-    Write-Host 'FORKS'
+    Write-Host "FORKS (builds: $(Get-BuildTypeLabel))"
     $i = 0
-    foreach ($f in $script:Catalog.forks) {
-        $i++
+    $writeLine = {
+        param($f)
         $entry = Get-Entry $state $f.id
         $label = 'not installed'
         if ($entry -and (Test-Installed $state $f)) {
@@ -1019,8 +1193,17 @@ function Show-Status {
             if ($entry.pinned) { $label += ' [pinned]' }
             if ($entry.previous) { $label += " (previous: $($entry.previous.tag))" }
         }
-        $shown = if ($script:CustomIds -contains $f.id) { "$($f.name) *" } else { $f.name }
-        Write-Host ('  {0,2}  {1,-24} {2}' -f $i, $shown, $label)
+        $shown = if ($script:CustomIds -contains $f.base_id) { "$($f.name) *" } else { $f.name }
+        Write-Host ('  {0,2}  {1,-30} {2}' -f $i, $shown, $label)
+    }
+    foreach ($f in $script:Catalog.forks) { $i++; & $writeLine $f }
+    # Shown only when builds outside the selected build type are installed. Numbering continues.
+    $hidden = @(Get-HiddenInstalled $state)
+    if ($hidden.Count) {
+        $types = @($hidden | ForEach-Object { Get-VariantLabel $_ } | Select-Object -Unique) -join ' AND '
+        Write-Host ''
+        Write-Host "$types INSTALLED BUILDS (not your build type: no updates. d<number> removes one)"
+        foreach ($f in $hidden) { $i++; & $writeLine $f }
     }
     if ($script:CustomIds.Count) { Write-Host '      * added by you' }
     Write-Host ''
@@ -1052,6 +1235,8 @@ function Invoke-Menu {
         Write-Host '  2    open fork 2 (installs it first if needed)   g3  open the recommended fork for game 3'
         Write-Host '  n3   add a note for game 3   r1  roll back fork 1   p1  pin or unpin fork 1'
         Write-Host '  a    add a fork from a link   x5  remove fork 5 (only forks you added)'
+        Write-Host '  d4   delete the installed files of build 4 (it stays in the list)'
+        Write-Host "  v    build type: MSVC, PGO or both (now: $(Get-BuildTypeLabel))"
         Write-Host "  z    zip backups (now: $(Get-ZipBackupLabel))"
         Write-Host '  u    update now   b  open GAMES.md   q  quit'
         $choice = (Read-Host 'Choice').Trim().ToLower()
@@ -1068,8 +1253,9 @@ function Invoke-Menu {
             }
             elseif ($choice -match '^x(\d+)$') {
                 $f = Get-ForkByNumber $Matches[1]
-                if ($script:CustomIds -notcontains $f.id) { throw "$($f.name) ships with the tool and cannot be removed here." }
-                if ((Read-Host "Remove $($f.name) and delete its installed files? (y/n)").Trim().ToLower() -eq 'y') {
+                if ($script:CustomIds -notcontains $f.base_id) { throw "$($f.name) ships with the tool and cannot be removed here." }
+                $what = if ($f.pgo) { "$($f.name) (MSVC and PGO builds)" } else { $f.name }
+                if ((Read-Host "Remove $what and delete its installed files? (y/n)").Trim().ToLower() -eq 'y') {
                     Remove-CustomFork $f
                     Write-Base
                 }
@@ -1083,6 +1269,30 @@ function Invoke-Menu {
                 Write-Host "Downloaded zips are kept in $script:ZipDir\<fork>. Now: $(Get-ZipBackupLabel)."
                 $value = Read-Host 'Zips to keep per fork: 0 = none, a number, or all (Enter = no change)'
                 if ($value.Trim()) { Set-ZipBackups $value }
+            }
+            elseif ($choice -eq 'v') {
+                Write-Host 'PGO builds are optimized with a recorded profile: often faster, sometimes less stable.'
+                Write-Host 'They install to their own folder (<install_dir>\<id>-pgo), next to the standard MSVC build.'
+                Write-Host 'Forks that publish no PGO build always show their MSVC build.'
+                $value = Read-Host "Build type: m = MSVC, p = PGO, b = both (now: $(Get-BuildTypeLabel), Enter = no change)"
+                if ($value.Trim()) {
+                    Switch-BuildType $value
+                    Write-Base
+                }
+            }
+            elseif ($choice -match '^d(\d+)$') {
+                $f = Get-ForkByNumber $Matches[1]
+                $state = Get-State
+                if (-not (Test-Installed $state $f)) { throw "$($f.name) is not installed." }
+                $selectedType = @($script:Catalog.forks | Where-Object { $_.id -eq $f.id }).Count -gt 0
+                $sibling = @($script:AllForks | Where-Object { $_.base_id -eq $f.base_id -and $_.id -ne $f.id -and (Test-Installed $state $_) }).Count -gt 0
+                if ($selectedType -and $sibling) {
+                    Write-Host "$($f.name) is in your build type ($(Get-BuildTypeLabel)) and another build of this fork is installed, so the next update installs it again. Change the build type with v to stop that."
+                }
+                if ((Read-Host "Delete the installed files of $($f.name) ($((Get-Entry $state $f.id).tag))? (y/n)").Trim().ToLower() -eq 'y') {
+                    Remove-Build $f
+                    Write-Base
+                }
             }
             elseif ($choice -eq 'b') { Start-Process -FilePath $script:GamesFile | Out-Null }
             elseif ($choice -match '^(\d+)$') {
