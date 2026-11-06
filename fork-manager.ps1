@@ -339,7 +339,10 @@ function Assert-Download([string]$Zip, $Asset) {
     }
     if ($Asset.digest -match '^sha256:(.+)$') {
         $expected = $Matches[1]
-        $hash = (Get-FileHash -LiteralPath $Zip -Algorithm SHA256).Hash
+        $stream = [IO.File]::OpenRead($Zip)
+        $sha256 = [Security.Cryptography.SHA256]::Create()
+        $hash = ([BitConverter]::ToString($sha256.ComputeHash($stream)) -replace '-').ToLower()
+        $stream.Close()
         if ($hash -ine $expected) { throw "SHA-256 mismatch for $($Asset.name): expected $expected, got $hash." }
         return 'SHA-256 ok'
     }
