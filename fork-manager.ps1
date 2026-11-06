@@ -399,6 +399,30 @@ function Invoke-Download([string]$Url, [string]$OutFile, [bool]$Auth = $false) {
 }
 
 # Checks the transfer: size always, SHA-256 when the source publishes it. This proves integrity, not trust.
+# SHA-256 of a file as lowercase hex. Uses .NET directly (works in Windows PowerShell 5.1 and PowerShell 7).
+# If that throws, it falls back to Get-FileHash. Only errors fall back: comparing the hash is the caller's job.
+function Get-Sha256([string]$Path) {
+    try {
+        $stream = $null
+        $sha256 = $null
+        try {
+            $stream = [IO.File]::OpenRead($Path)
+            $sha256 = [Security.Cryptography.SHA256]::Create()
+            return ([BitConverter]::ToString($sha256.ComputeHash($stream)) -replace '-').ToLower()
+        }
+        finally {
+            # Release the file handle even when hashing throws.
+            if ($stream) { $stream.Dispose() }
+            if ($sha256) { $sha256.Dispose() }
+        }
+    }
+    catch {
+        $first = $_.Exception.Message
+        try { return (Get-FileHash -LiteralPath $Path -Algorithm SHA256).Hash.ToLower() }
+        catch { throw "Could not compute the SHA-256 of $Path. .NET: $first Get-FileHash: $($_.Exception.Message)" }
+    }
+}
+
 function Assert-Download([string]$Zip, $Asset) {
     $actual = (Get-Item -LiteralPath $Zip).Length
     if ($Asset.size -gt 0 -and $actual -ne $Asset.size) {
@@ -406,10 +430,7 @@ function Assert-Download([string]$Zip, $Asset) {
     }
     if ($Asset.digest -match '^sha256:(.+)$') {
         $expected = $Matches[1]
-        $stream = [IO.File]::OpenRead($Zip)
-        $sha256 = [Security.Cryptography.SHA256]::Create()
-        $hash = ([BitConverter]::ToString($sha256.ComputeHash($stream)) -replace '-').ToLower()
-        $stream.Close()
+        $hash = Get-Sha256 $Zip
         if ($hash -ine $expected) { throw "SHA-256 mismatch for $($Asset.name): expected $expected, got $hash." }
         return 'SHA-256 ok'
     }
