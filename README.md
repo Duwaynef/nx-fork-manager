@@ -9,6 +9,7 @@ It only installs ready-made release builds that the fork authors publish. It doe
 ## Features
 
 - Installs and updates forks from GitHub releases, GitHub Actions builds, and Forgejo releases.
+- Adds a new fork from a pasted link. The tool finds the Windows build and writes the rule for future builds.
 - Verifies every download. It checks the SHA-256 when the source publishes one, and the file size otherwise.
 - Keeps the previous version of each fork. You can roll back with one key, and a rollback pins the fork so the next update does not undo it.
 - Never replaces a fork while it is running.
@@ -58,11 +59,37 @@ GAMES
 | `n3` | Adds a note for game 3: which fork you tested, the result, and if that fork becomes your default for the game. |
 | `r1` | Rolls fork 1 back to the previous version and pins it. |
 | `p1` | Pins or unpins fork 1. A pinned fork does not get updates. |
+| `a` | Adds a fork from a link. See [Add a fork from a link](#add-a-fork-from-a-link). |
+| `x12` | Removes fork 12 and its installed files. This works only for forks you added. |
 | `u` | Checks for updates now, ignoring the check interval. |
 | `b` | Opens `GAMES.md`, the full table with evidence from the guide and your notes. |
 | `q` | Quits. |
 
 Only installed forks get updates. A fork you never opened does not use disk space or API requests.
+
+## Add a fork from a link
+
+A new fork came out and it is not in the list? Type `a` in the menu and paste its link. These links work:
+
+| Link | Example |
+|---|---|
+| GitHub repository, releases page or release | `https://github.com/Frizti/Lichii/releases/tag/frizti-v1` |
+| Forgejo or Gitea repository | `https://git.eden-emu.dev/Franseven/PokeDinner-a-Eglantine-Fork` |
+| GitHub Actions workflow, for forks that publish builds only through Actions | `https://github.com/zortos293/Lichii/actions/workflows/release-binaries.yml` |
+
+The tool then:
+
+1. Reads the newest releases (or the newest successful Actions runs) and picks the Windows `.zip`. It prefers MSVC builds and skips Linux, macOS, Android, ARM, PGO, debug and symbol files.
+2. Turns the file name into a rule that also matches future builds. For example, `selevet-eglantine-performance-7-windows-x86_64.zip` becomes `^selevet-eglantine-performance-\d+[a-z]?-windows-x\d+[a-z]?_\d+[a-z]?\.zip$`.
+3. Checks that the rule finds the same build, and saves the fork in `my-forks.json`.
+4. If the wichforks guide knows the fork, takes its name and id, so the fork shows up in the game recommendations and the GPU filter.
+5. Asks if you want to install and open it now.
+
+Forks you add get a `*` in the menu. `my-forks.json` is not tracked by git, so updates of this tool keep your forks.
+
+If the tool picks the wrong file, or the fork renames its files later, edit the `include` and `exclude` rules in `my-forks.json`. The keys are the same as in `forks.json` (see [forks.json](#forksjson-the-fork-catalog)).
+
+If a fork has no Windows build yet, the tool says so and adds nothing. Try again after the author publishes one.
 
 ## Command line
 
@@ -83,25 +110,74 @@ powershell -NoProfile -ExecutionPolicy Bypass -File fork-manager.ps1 -Action Upd
 | `Pin -Fork <id>` / `Unpin -Fork <id>` | Stops or resumes updates for a fork. |
 | `Open -Fork <id>` | Opens a fork, installing it first if needed. |
 | `Sync` | Downloads the latest wichforks guide. |
+| `Add -Url <link>` | Adds a fork from a link. |
+| `Remove -Fork <id>` | Removes a fork you added, with its installed files. |
 
 Fork ids are in `forks.json` (for example `selevet`, `pokedinner`, `lichii-git`). For an Actions build, `-Tag` takes the build name, for example `-Tag build-80`.
 
-## GitHub token (optional, recommended)
+## 403 errors and the GitHub API limit
 
-Without a token, GitHub allows 60 API requests per hour from your IP address. Each fork check uses one or two requests. To make sure it does not hit the limit, the tool checks each fork at most once per `check_interval_minutes`. If you still hit the limit, the tool tells you when it resets.
+### The problem
 
-A token raises the limit to 5000 requests per hour. It also lets the tool download GitHub Actions builds directly from GitHub instead of through nightly.link.
+Without a login, the GitHub API accepts only **60 requests per hour per IP address**. When the limit runs out, GitHub answers `403 rate limit exceeded` and the tool shows:
 
-1. Open <https://github.com/settings/personal-access-tokens/new>.
-2. Give the token a name, set **Repository access** to **Public repositories**, and do not add any permissions.
-3. Generate the token and copy it.
-4. Save it as a user environment variable, then close and reopen `ForkManager.cmd`:
+```
+GitHub API limit reached (60 requests per hour without a token). Resets at 21:14. Set GITHUB_TOKEN for a limit of 5000.
+```
+
+You reach the limit faster than you expect, because:
+
+- Each fork check uses one request, and an Actions build ("git build") uses two or more. The guide sync uses two or three.
+- Every program on your network shares the same 60 requests: other launchers, browser extensions, another PC on the same router, or a VPN exit that many people use.
+- An answer of "nothing changed" (HTTP 304) still counts.
+- Pressing `u` several times, or running `-Action Check` for all forks, uses many requests at once.
+
+The file downloads themselves do not count. Only the API questions ("what is the latest release?") count.
+
+### What the tool already does
+
+- The menu checks each fork at most once per `check_interval_minutes` (60 by default). A second start within the hour uses no requests.
+- When the limit runs out, the tool stops asking GitHub, shows the reset time once, and keeps your installed versions as they are. Forgejo forks (PokeDinner) still update, because the limit is GitHub only.
+- A fork that failed to update is checked again next time, so nothing is skipped for good.
+
+### The fix: a GitHub token (recommended)
+
+A token raises the limit to **5000 requests per hour**, only for you. It also lets the tool download Actions builds directly from GitHub instead of through nightly.link. It is free and takes two minutes:
+
+1. Sign in to GitHub. If you do not have an account, create one.
+2. Open <https://github.com/settings/personal-access-tokens/new>.
+3. Give the token a name, for example `nx-fork-manager`. Choose an expiration date.
+4. Under **Repository access**, choose **Public repositories**. Do not add any permissions. A token without permissions can only read public data.
+5. Click **Generate token** and copy it. It starts with `github_pat_`.
+6. Open a Command Prompt and save the token as a user environment variable:
 
    ```bash
    setx GITHUB_TOKEN "paste-your-token-here"
    ```
 
-The token is read-only and only reaches `api.github.com`. Do not share it, and do not put it in any file in this folder.
+7. Close every open `ForkManager.cmd` window and open it again. `setx` affects only windows opened after it.
+
+To check that the token works, open a new Command Prompt and run:
+
+```bash
+curl -s -H "Authorization: Bearer %GITHUB_TOKEN%" https://api.github.com/rate_limit
+```
+
+The `core` section must show `"limit": 5000`. Without the header the same command shows how much of the 60 is left on your IP address.
+
+The tool sends the token only to `api.github.com`. Do not share it, do not paste it in chats or issues, and do not save it in any file in this folder. If it leaks, delete it on the same GitHub page and create a new one.
+
+### Without a token
+
+- Wait until the reset time the tool shows, then open it again.
+- Raise `check_interval_minutes` in `config.json`, for example to `180`.
+- Do not press `u` repeatedly. Normal starts are enough.
+- Install only the forks you use. Forks you never opened are never checked.
+
+### Other GitHub errors
+
+- **"GitHub rejected GITHUB_TOKEN (401 Bad credentials)"**: the token expired or was deleted. Create a new one and run `setx` again, or remove it with `reg delete HKCU\Environment /v GITHUB_TOKEN /f` to go back to the 60-per-hour limit.
+- **"GitHub refused the request (403)" without "limit reached"**: GitHub's short-term abuse protection. Wait a few minutes.
 
 ## Configuration
 
@@ -125,7 +201,7 @@ The first run creates this file. It is not tracked by git, so updates of this to
 
 ### forks.json (the fork catalog)
 
-This file lists the forks the tool knows about. To add a fork, add an entry:
+This file lists the forks that ship with the tool. To add a fork for yourself, use `a` in the menu: it writes the same kind of entry to `my-forks.json`. To add a fork for everyone, add an entry here and open a pull request:
 
 ```json
 {
@@ -177,6 +253,7 @@ Most forks in the catalog are based on Eden/Eglantine and share the same user fo
 | `fork-manager.ps1` | yes | The tool. |
 | `forks.json` | yes | Fork catalog. |
 | `config.json` | no | Your settings. |
+| `my-forks.json` | no | Forks you added from links. |
 | `GAMES.md` | no | Generated table of the best fork per game. |
 | `data\state.json` | no | Installed and previous versions. |
 | `data\my-notes.json` | no | Your notes per game. |
@@ -188,7 +265,8 @@ To update the tool itself, download the new `fork-manager.ps1`, `forks.json` and
 
 ## Troubleshooting
 
-- **"GitHub API limit reached"**: wait until the time shown, or set a `GITHUB_TOKEN`.
+- **"GitHub API limit reached" or 403**: see [403 errors and the GitHub API limit](#403-errors-and-the-github-api-limit).
+- **"No release of ... has a Windows .zip"** when you add a fork: the fork has no Windows build yet, or only publishes Actions builds. Paste the workflow link instead.
 - **"... is running. Close it and try again."**: close the emulator. The tool never replaces files in use.
 - **"Build ... has no valid Windows artifact"**: GitHub deletes Actions artifacts after a few days. Use a newer build.
 - **Windows SmartScreen or antivirus warnings**: these come from the emulator builds, not from this tool. Check the fork's release page if you are not sure.

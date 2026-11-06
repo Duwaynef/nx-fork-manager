@@ -2,12 +2,14 @@
 # recommends a fork per game from the riyadhHDA/wichforks community guide.
 # Normal use: run ForkManager.cmd. Direct actions:
 #   -Action Check|Update|Install|Rollback|Pin|Unpin|Open|Sync|Status [-Fork <id>] [-Tag <tag>]
+#   -Action Add -Url <repository link>   /   -Action Remove -Fork <id>
 [CmdletBinding()]
 param(
-    [ValidateSet('Menu', 'Check', 'Update', 'Install', 'Rollback', 'Pin', 'Unpin', 'Open', 'Sync', 'Status')]
+    [ValidateSet('Menu', 'Check', 'Update', 'Install', 'Rollback', 'Pin', 'Unpin', 'Open', 'Sync', 'Status', 'Add', 'Remove')]
     [string]$Action = 'Menu',
     [string]$Fork,
-    [string]$Tag
+    [string]$Tag,
+    [string]$Url
 )
 
 $ErrorActionPreference = 'Stop'
@@ -24,6 +26,7 @@ $script:StateFile = Join-Path $script:DataDir 'state.json'
 $script:ChecksFile = Join-Path $script:DataDir 'checks.json'
 $script:NotesFile = Join-Path $script:DataDir 'my-notes.json'
 $script:ConfigFile = Join-Path $script:Here 'config.json'
+$script:MyForksFile = Join-Path $script:Here 'my-forks.json'
 $script:GamesFile = Join-Path $script:Here 'GAMES.md'
 
 # --- helpers -------------------------------------------------------------------------------------
@@ -70,8 +73,20 @@ function Get-Config {
     return $cfg
 }
 
+# forks.json ships with the tool. my-forks.json holds the forks you add, so updating the tool never touches them.
+function Import-Catalog {
+    $catalog = [IO.File]::ReadAllText((Join-Path $script:Here 'forks.json')) | ConvertFrom-Json
+    $mine = Read-JsonFile $script:MyForksFile
+    $script:CustomIds = @()
+    if ($mine -and $mine.forks) {
+        $catalog.forks = @($catalog.forks) + @($mine.forks)
+        $script:CustomIds = @($mine.forks | ForEach-Object { $_.id })
+    }
+    return $catalog
+}
+
 New-Item -ItemType Directory -Force -Path $script:DataDir | Out-Null
-$script:Catalog = [IO.File]::ReadAllText((Join-Path $script:Here 'forks.json')) | ConvertFrom-Json
+$script:Catalog = Import-Catalog
 $script:Config = Get-Config
 $script:ForksDir = if ([IO.Path]::IsPathRooted([string]$script:Config.install_dir)) { [string]$script:Config.install_dir }
 else { Join-Path $script:Here ([string]$script:Config.install_dir) }
@@ -143,6 +158,12 @@ function Get-JsonUrl([string]$Url) {
             if ($isGitHub -and ($code -eq 403 -or $code -eq 429) -and $r.Headers['X-RateLimit-Remaining'] -eq '0') {
                 $script:BlockedUntil = [DateTimeOffset]::FromUnixTimeSeconds([long]$r.Headers['X-RateLimit-Reset']).LocalDateTime
                 throw (Get-LimitMessage)
+            }
+            if ($isGitHub -and $code -eq 401 -and $env:GITHUB_TOKEN) {
+                throw 'GitHub rejected GITHUB_TOKEN (401 Bad credentials). The token expired or was deleted. Create a new one, or remove the variable to use the 60-per-hour limit.'
+            }
+            if ($isGitHub -and ($code -eq 403 -or $code -eq 429)) {
+                throw "GitHub refused the request ($code). This is usually the short-term abuse limit: wait a few minutes. With a token, check that it can read public repositories."
             }
         }
         throw
@@ -618,8 +639,9 @@ function Get-Games {
         $pick = $null
         $pickSource = ''
         if ($note -and $note.fork) {
-            $pick = Get-ForkById $note.fork
-            $pickSource = 'my choice'
+            # A removed fork in an old note falls back to the guide.
+            $pick = $script:Catalog.forks | Where-Object { $_.id -eq $note.fork } | Select-Object -First 1
+            if ($pick) { $pickSource = 'my choice' }
         }
         $outside = $null
         if (-not $pick) {
@@ -715,6 +737,174 @@ function Add-Note([string]$Game, $F, [string]$Text, [bool]$Prefer) {
     Write-Base
 }
 
+# --- add a fork from a link ----------------------------------------------------------------------
+
+# Turns an asset name into a rule that also matches future builds:
+# numbers become \d+, commit hashes become [0-9a-f]+, the rest stays literal.
+function ConvertTo-NamePattern([string]$Name) {
+    $sb = New-Object Text.StringBuilder '^'
+    $pos = 0
+    foreach ($m in [regex]::Matches($Name, '[0-9A-Fa-f]{7,}|\d+[a-z]?(?![a-zA-Z])|\d+')) {
+        [void]$sb.Append([regex]::Escape($Name.Substring($pos, $m.Index - $pos)))
+        $v = $m.Value
+        $next = $m.Index + $m.Length
+        $letterNext = $next -lt $Name.Length -and [char]::IsLetter($Name[$next])
+        if ($v -match '^\d+$' -and $letterNext) { [void]$sb.Append('\d+') }
+        elseif ($v -match '^\d+[a-z]?$') { [void]$sb.Append('\d+[a-z]?') }
+        elseif ($v -match '\d' -and $v -match '[A-Fa-f]') { [void]$sb.Append('[0-9a-fA-F]+') }
+        else { [void]$sb.Append([regex]::Escape($v)) }
+        $pos = $next
+    }
+    [void]$sb.Append([regex]::Escape($Name.Substring($pos))).Append('$')
+    return $sb.ToString()
+}
+
+# Picks the Windows build among release assets or Actions artifacts. Prefers MSVC, avoids PGO and debug files.
+function Select-WindowsAsset($Assets, [bool]$Artifact) {
+    $best = $null
+    $bestScore = -1
+    foreach ($a in $Assets) {
+        $n = [string]$a.name
+        if (-not $Artifact -and $n -notmatch '(?i)\.zip$') { continue }
+        if ($n -match '(?i)linux|macos|\bmac\b|osx|darwin|android|\.apk|arm64|aarch64|appimage|source|\bsrc\b|symbols|pdb|debug|exe-only') { continue }
+        $score = 0
+        if ($n -match '(?i)win|msvc|x86_64|x64|amd64') { $score += 10 }
+        if ($n -match '(?i)msvc') { $score += 2 }
+        if ($n -match '(?i)pgo') { $score -= 3 }
+        if ($Artifact -and $score -lt 7) { continue }
+        if ($score -gt $bestScore) { $best = $a; $bestScore = $score }
+    }
+    return $best
+}
+
+function Get-FreeForkId([string[]]$Choices) {
+    $taken = @($script:Catalog.forks | ForEach-Object { $_.id })
+    foreach ($c in $Choices) { if ($taken -notcontains $c) { return $c } }
+    for ($i = 2; ; $i++) { if ($taken -notcontains "$($Choices[-1])-$i") { return "$($Choices[-1])-$i" } }
+}
+
+function New-ForkFromUrl([string]$Link) {
+    $Link = $Link.Trim().Trim('"')
+    if ($Link -notmatch '^https?://([^/]+)/([^/]+)/([^/?#]+)(.*)$') {
+        throw "Not a repository link: $Link. Example: https://github.com/owner/repo"
+    }
+    $hostName = $Matches[1].ToLower() -replace '^www\.', ''
+    $owner = $Matches[2]
+    $repoName = $Matches[3] -replace '\.git$', ''
+    $rest = $Matches[4]
+    $repo = "$owner/$repoName"
+
+    $f = [ordered]@{ id = $null; name = $null }
+    if ($hostName -eq 'github.com') {
+        if ($rest -match '/actions/workflows/([^/?#]+)') {
+            $f.source = 'actions'
+            $f.repo = $repo
+            $f.workflow = $Matches[1]
+            $f.branch = $null
+        }
+        else {
+            $f.source = 'github'
+            $f.repo = $repo
+        }
+    }
+    else {
+        $f.source = 'forgejo'
+        $f.host = $hostName
+        $f.repo = $repo
+    }
+    $f = [pscustomobject]$f
+
+    $same = @($script:Catalog.forks | Where-Object {
+            $_.repo -ieq $repo -and $_.source -eq $f.source -and ($f.source -ne 'actions' -or $_.workflow -eq $f.workflow)
+        })
+    if ($same.Count) { throw "This fork is already in the list: $($same[0].name) (id $($same[0].id))." }
+
+    # Find the Windows build and turn its name into a rule for future builds.
+    $asset = $null
+    if ($f.source -eq 'actions') {
+        $runs = (Get-JsonUrl "https://api.github.com/repos/$repo/actions/workflows/$($f.workflow)/runs?status=success&per_page=5").workflow_runs
+        foreach ($run in $runs) {
+            $arts = @((Get-JsonUrl "https://api.github.com/repos/$repo/actions/runs/$($run.id)/artifacts?per_page=50").artifacts | Where-Object { -not $_.expired })
+            $asset = Select-WindowsAsset $arts $true
+            if ($asset) { break }
+        }
+        if (-not $asset) { throw "No recent successful run of $($f.workflow) has a Windows artifact." }
+    }
+    else {
+        try { $releases = Get-Releases $f }
+        catch {
+            if ($f.source -eq 'forgejo') { throw "Could not read releases from $hostName. Only GitHub and Forgejo/Gitea hosts work. ($($_.Exception.Message))" }
+            throw
+        }
+        foreach ($r in $releases) {
+            $asset = Select-WindowsAsset $r.assets $false
+            if ($asset) { break }
+        }
+        if (-not $asset) {
+            $hint = if ($f.source -eq 'github') { ' If it only publishes GitHub Actions builds, paste the workflow link instead (https://github.com/owner/repo/actions/workflows/<file>.yml).' } else { '' }
+            throw "No release of $repo has a Windows .zip.$hint"
+        }
+    }
+    Set-Prop $f 'include' (ConvertTo-NamePattern ([string]$asset.name))
+    Set-Prop $f 'exclude' $null
+
+    # The guide lists many forks: reuse its name and id, so the GPU filter and game table know this fork.
+    $guide = Read-JsonFile (Join-Path $script:CacheDir 'forks.json')
+    $known = $null
+    if ($guide) { $known = $guide.forks | Where-Object { ([string]$_.repo).TrimEnd('/') -ieq "https://$hostName/$repo" } | Select-Object -First 1 }
+    $name = if ($known) { [string]$known.name } else { "$repoName ($owner)" }
+    if ($f.source -eq 'actions') { $name += ' (git build)' }
+    $f.name = $name
+    $slugOwner = ($owner.ToLower() -replace '[^a-z0-9]+', '-').Trim('-')
+    $slugRepo = ($repoName.ToLower() -replace '[^a-z0-9]+', '-').Trim('-')
+    $suffix = if ($f.source -eq 'actions') { '-git' } else { '' }
+    $f.id = Get-FreeForkId @("$slugOwner$suffix", "$slugOwner-$slugRepo$suffix")
+    # Words the guide's game table may use for this fork: owner, first word of the repo and of the guide name.
+    $aliases = New-Object Collections.ArrayList
+    $words = @($owner, ($repoName -split '[-_ .]')[0])
+    if ($known) { $words += ([string]$known.name -split '[ (]')[0] }
+    foreach ($w in $words) {
+        if ($w -and $w.Length -ge 3 -and $w -notmatch '^(?i)(eglantine|lichii|eden|yuzu|sudachi|citron|nx2?|emu|switch)$' -and -not ($aliases -contains $w)) { [void]$aliases.Add($w) }
+    }
+    Set-Prop $f 'aliases' @($aliases)
+    Set-Prop $f 'wichforks_id' $(if ($known) { [string]$known.id } else { $null })
+
+    # Prove the rule finds the same build before saving it.
+    $latest = Get-LatestInfo $f ''
+    return [pscustomobject]@{ fork = $f; latest = $latest }
+}
+
+function Add-CustomFork([string]$Link) {
+    $result = New-ForkFromUrl $Link
+    $mine = Read-JsonFile $script:MyForksFile
+    if ($null -eq $mine) { $mine = [pscustomobject]@{ forks = @() } }
+    $mine.forks = @($mine.forks) + @($result.fork)
+    Write-JsonFile $script:MyForksFile $mine
+    $script:Catalog = Import-Catalog
+    $number = @($script:Catalog.forks).Count
+    Write-Host "Added $($result.fork.name) as fork $number (id $($result.fork.id))."
+    Write-Host "  Latest build: $($result.latest.release.tag), file $($result.latest.asset.name)."
+    Write-Host "  File rule: $($result.fork.include)  (edit my-forks.json to change it)"
+    return $result.fork
+}
+
+# Removes a fork you added, with its installed files. Forks that ship with the tool stay.
+function Remove-CustomFork($F) {
+    if ($script:CustomIds -notcontains $F.id) { throw "$($F.name) ships with the tool and cannot be removed here. Just do not open it: forks you never open use no disk space." }
+    $dest = Get-ForkDir $F.id
+    $running = @(Get-RunningUnder $dest)
+    if ($running.Count) { throw "$($F.name) is running ($($running[0].Name)). Close it and try again." }
+    Remove-Managed $dest
+    Remove-Managed (Get-PrevForkDir $F.id)
+    $state = Get-State
+    if ($state.PSObject.Properties[$F.id]) { $state.PSObject.Properties.Remove($F.id); Write-JsonFile $script:StateFile $state }
+    $mine = Read-JsonFile $script:MyForksFile
+    $mine.forks = @($mine.forks | Where-Object { $_.id -ne $F.id })
+    Write-JsonFile $script:MyForksFile $mine
+    $script:Catalog = Import-Catalog
+    Write-Host "Removed $($F.name) and its installed files."
+}
+
 # --- open and menu -------------------------------------------------------------------------------
 
 function Open-Fork($F) {
@@ -755,8 +945,10 @@ function Show-Status {
             if ($entry.pinned) { $label += ' [pinned]' }
             if ($entry.previous) { $label += " (previous: $($entry.previous.tag))" }
         }
-        Write-Host ('  {0,2}  {1,-24} {2}' -f $i, $f.name, $label)
+        $shown = if ($script:CustomIds -contains $f.id) { "$($f.name) *" } else { $f.name }
+        Write-Host ('  {0,2}  {1,-24} {2}' -f $i, $shown, $label)
     }
+    if ($script:CustomIds.Count) { Write-Host '      * added by you' }
     Write-Host ''
     Write-Host 'GAMES'
     $i = 0
@@ -785,10 +977,28 @@ function Invoke-Menu {
         Write-Host ''
         Write-Host '  2    open fork 2 (installs it first if needed)   g3  open the recommended fork for game 3'
         Write-Host '  n3   add a note for game 3   r1  roll back fork 1   p1  pin or unpin fork 1'
+        Write-Host '  a    add a fork from a link   x5  remove fork 5 (only forks you added)'
         Write-Host '  u    update now   b  open GAMES.md   q  quit'
         $choice = (Read-Host 'Choice').Trim().ToLower()
         try {
             if ($choice -eq 'q') { return }
+            elseif ($choice -eq 'a') {
+                $link = Read-Host 'Paste the fork link (GitHub, Forgejo, or a GitHub Actions workflow)'
+                if (-not $link.Trim()) { continue }
+                $added = Add-CustomFork $link
+                if ((Read-Host 'Install and open it now? (y/n)').Trim().ToLower() -eq 'y') {
+                    Open-Fork $added
+                    return
+                }
+            }
+            elseif ($choice -match '^x(\d+)$') {
+                $f = Get-ForkByNumber $Matches[1]
+                if ($script:CustomIds -notcontains $f.id) { throw "$($f.name) ships with the tool and cannot be removed here." }
+                if ((Read-Host "Remove $($f.name) and delete its installed files? (y/n)").Trim().ToLower() -eq 'y') {
+                    Remove-CustomFork $f
+                    Write-Base
+                }
+            }
             elseif ($choice -eq 'u') {
                 try { [void](Sync-Knowledge) } catch { Write-Warning $_.Exception.Message }
                 [void](Update-Forks (Get-InstalledForks (Get-State)))
@@ -864,6 +1074,8 @@ try {
         'Pin' { if (-not $selected) { throw 'Pin needs -Fork.' }; Set-Pin $selected $true; Write-Base }
         'Unpin' { if (-not $selected) { throw 'Unpin needs -Fork.' }; Set-Pin $selected $false; Write-Base }
         'Open' { if (-not $selected) { throw 'Open needs -Fork.' }; Open-Fork $selected }
+        'Add' { if (-not $Url) { throw 'Add needs -Url.' }; [void](Add-CustomFork $Url) }
+        'Remove' { if (-not $selected) { throw 'Remove needs -Fork.' }; Remove-CustomFork $selected; Write-Base }
     }
 }
 catch {

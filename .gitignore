@@ -1,5 +1,6 @@
 # Local settings and runtime data
 config.json
+my-forks.json
 GAMES.md
 data/
 forks/

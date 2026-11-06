@@ -43,7 +43,7 @@
       "name": "Lichii (Frizti)",
       "source": "github",
       "repo": "Frizti/Lichii",
-      "include": "windows-x86_64.*\\.zip$",
+      "include": "windows-x(86_)?64.*\\.zip$",
       "exclude": "symbols|pgo",
       "exe": "lichii.exe",
       "aliases": ["Frizti"],
