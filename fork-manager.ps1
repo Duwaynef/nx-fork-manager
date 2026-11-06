@@ -65,6 +65,7 @@ function Get-Config {
             gpu                    = Get-DetectedGpu
             install_dir            = 'forks'
             check_interval_minutes = 60
+            zip_backups            = 0
         }
         Write-JsonFile $script:ConfigFile $cfg
         $shown = if ($cfg.gpu) { $cfg.gpu } else { 'not detected (no GPU filter)' }
@@ -92,6 +93,7 @@ $script:ForksDir = if ([IO.Path]::IsPathRooted([string]$script:Config.install_di
 else { Join-Path $script:Here ([string]$script:Config.install_dir) }
 $script:ForksDir = [IO.Path]::GetFullPath($script:ForksDir)
 $script:PrevDir = Join-Path $script:ForksDir '_previous'
+$script:ZipDir = Join-Path $script:ForksDir '_zips'
 
 # Deletes only inside folders this tool owns.
 function Remove-Managed([string]$Path) {
@@ -199,6 +201,71 @@ function Get-Entry($State, [string]$Id) {
 
 function Get-ForkDir([string]$Id) { return Join-Path $script:ForksDir $Id }
 function Get-PrevForkDir([string]$Id) { return Join-Path $script:PrevDir $Id }
+function Get-ZipForkDir([string]$Id) { return Join-Path $script:ZipDir $Id }
+
+# --- zip backups ---------------------------------------------------------------------------------
+# config.json "zip_backups": 0 = keep no zips (default), a number = keep that many per fork, "all" = keep every zip.
+
+# Returns -1 for "all", otherwise the number of zips to keep per fork.
+function Get-ZipBackupLimit {
+    $value = $script:Config.PSObject.Properties['zip_backups']
+    if (-not $value -or $null -eq $value.Value) { return 0 }
+    $text = ([string]$value.Value).Trim()
+    if ($text -ieq 'all') { return -1 }
+    $n = 0
+    if ([int]::TryParse($text, [ref]$n) -and $n -ge 0) { return $n }
+    Write-Warning "config.json: zip_backups must be 0, a number or ""all"" (found ""$text""). No zips are kept."
+    return 0
+}
+
+function Get-ZipBackupLabel {
+    $limit = Get-ZipBackupLimit
+    if ($limit -lt 0) { return 'all' }
+    if ($limit -eq 0) { return 'none' }
+    return "$limit per fork"
+}
+
+# Deletes the oldest zips of a fork beyond the limit. With "all" nothing is deleted.
+function Limit-ZipBackups([string]$Id) {
+    $limit = Get-ZipBackupLimit
+    if ($limit -lt 0) { return }
+    $dir = Get-ZipForkDir $Id
+    if (-not (Test-Path -LiteralPath $dir)) { return }
+    $zips = @(Get-ChildItem -LiteralPath $dir -File -Filter *.zip | Sort-Object LastWriteTime -Descending)
+    foreach ($old in ($zips | Select-Object -Skip $limit)) { Remove-Managed $old.FullName }
+    if (-not (Get-ChildItem -LiteralPath $dir -Force)) { Remove-Managed $dir }
+}
+
+# Keeps the downloaded zip, named after its tag so builds with the same file name do not overwrite each other.
+function Save-ZipBackup($F, [string]$Zip, $Info) {
+    if ((Get-ZipBackupLimit) -eq 0) { return }
+    $dir = Get-ZipForkDir $F.id
+    New-Item -ItemType Directory -Force -Path $dir | Out-Null
+    $tag = ($Info.release.tag -replace '[^\w.-]+', '-').Trim('-')
+    $name = [string]$Info.asset.name
+    if ($name -notmatch '(?i)\.zip$') { $name += '.zip' }
+    $target = Join-Path $dir "$tag`_$name"
+    Move-Item -LiteralPath $Zip -Destination $target -Force
+    (Get-Item -LiteralPath $target).LastWriteTime = Get-Date
+    Limit-ZipBackups $F.id
+    Write-Host "  Zip kept: $target"
+}
+
+function Set-ZipBackups([string]$Value) {
+    $text = $Value.Trim().ToLower()
+    $n = 0
+    if ($text -eq 'all') { $stored = 'all' }
+    elseif ([int]::TryParse($text, [ref]$n) -and $n -ge 0) { $stored = $n }
+    else { throw 'Type 0 (no backups), a number, or "all".' }
+    Set-Prop $script:Config 'zip_backups' $stored
+    Write-JsonFile $script:ConfigFile $script:Config
+    # Apply a lower limit right away.
+    if (Test-Path -LiteralPath $script:ZipDir) {
+        foreach ($d in @(Get-ChildItem -LiteralPath $script:ZipDir -Directory)) { Limit-ZipBackups $d.Name }
+        if (-not (Get-ChildItem -LiteralPath $script:ZipDir -Force)) { Remove-Managed $script:ZipDir }
+    }
+    Write-Host "Zip backups: $(Get-ZipBackupLabel)."
+}
 
 function Test-Installed($State, $F) {
     return ($null -ne (Get-Entry $State $F.id)) -and (Test-Path -LiteralPath (Get-ForkDir $F.id))
@@ -433,6 +500,9 @@ function Install-Release($F, $Info) {
             })
         Write-JsonFile $script:StateFile $state
         Write-Host "  OK: $($F.name) is now on $($Info.release.tag)."
+        # The install already succeeded: a backup problem is only a warning.
+        try { Save-ZipBackup $F $zip $Info }
+        catch { Write-Warning "Could not keep the zip of $($F.name): $($_.Exception.Message)" }
     }
     finally {
         Remove-Managed $work
@@ -899,6 +969,7 @@ function Remove-CustomFork($F) {
     if ($running.Count) { throw "$($F.name) is running ($($running[0].Name)). Close it and try again." }
     Remove-Managed $dest
     Remove-Managed (Get-PrevForkDir $F.id)
+    Remove-Managed (Get-ZipForkDir $F.id)
     $state = Get-State
     if ($state.PSObject.Properties[$F.id]) { $state.PSObject.Properties.Remove($F.id); Write-JsonFile $script:StateFile $state }
     $mine = Read-JsonFile $script:MyForksFile
@@ -981,6 +1052,7 @@ function Invoke-Menu {
         Write-Host '  2    open fork 2 (installs it first if needed)   g3  open the recommended fork for game 3'
         Write-Host '  n3   add a note for game 3   r1  roll back fork 1   p1  pin or unpin fork 1'
         Write-Host '  a    add a fork from a link   x5  remove fork 5 (only forks you added)'
+        Write-Host "  z    zip backups (now: $(Get-ZipBackupLabel))"
         Write-Host '  u    update now   b  open GAMES.md   q  quit'
         $choice = (Read-Host 'Choice').Trim().ToLower()
         try {
@@ -1006,6 +1078,11 @@ function Invoke-Menu {
                 try { [void](Sync-Knowledge) } catch { Write-Warning $_.Exception.Message }
                 [void](Update-Forks (Get-InstalledForks (Get-State)))
                 Write-Base
+            }
+            elseif ($choice -eq 'z') {
+                Write-Host "Downloaded zips are kept in $script:ZipDir\<fork>. Now: $(Get-ZipBackupLabel)."
+                $value = Read-Host 'Zips to keep per fork: 0 = none, a number, or all (Enter = no change)'
+                if ($value.Trim()) { Set-ZipBackups $value }
             }
             elseif ($choice -eq 'b') { Start-Process -FilePath $script:GamesFile | Out-Null }
             elseif ($choice -match '^(\d+)$') {

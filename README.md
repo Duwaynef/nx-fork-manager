@@ -61,6 +61,7 @@ GAMES
 | `p1` | Pins or unpins fork 1. A pinned fork does not get updates. |
 | `a` | Adds a fork from a link. See [Add a fork from a link](#add-a-fork-from-a-link). |
 | `x12` | Removes fork 12 and its installed files. This works only for forks you added. |
+| `z` | Sets how many downloaded zips to keep per fork: `0` (none), a number, or `all`. See `zip_backups` in [config.json](#configjson-your-settings). |
 | `u` | Checks for updates now, ignoring the check interval. |
 | `b` | Opens `GAMES.md`, the full table with evidence from the guide and your notes. |
 | `q` | Quits. |
@@ -189,7 +190,8 @@ The first run creates this file. It is not tracked by git, so updates of this to
 {
   "gpu": "NVIDIA",
   "install_dir": "forks",
-  "check_interval_minutes": 60
+  "check_interval_minutes": 60,
+  "zip_backups": 0
 }
 ```
 
@@ -198,6 +200,7 @@ The first run creates this file. It is not tracked by git, so updates of this to
 | `gpu` | `NVIDIA`, `AMD` or `Intel`. Hides guide recommendations for forks that the guide marks as not working on your GPU. Set it to `""` to turn off the filter. |
 | `install_dir` | Where forks are installed. A relative path starts from this folder. An absolute path also works. In JSON, write backslashes twice: `"D:\\Emulators\\forks"`. |
 | `check_interval_minutes` | How often the menu checks each fork. The `u` key ignores it. |
+| `zip_backups` | Downloaded zips to keep per fork in `<install_dir>\_zips\<id>`. `0` keeps none (default), a number keeps that many of the newest, `"all"` keeps every zip. The `z` key in the menu changes it. A lower number deletes the oldest extra zips right away. If the key is missing, no zips are kept. |
 
 ### forks.json (the fork catalog)
 
@@ -240,6 +243,7 @@ If you add a fork that others can use too, please open a pull request.
 3. It extracts the zip and finds the folder with the main executable.
 4. It moves the current version to `<install_dir>\_previous\<id>` and moves the new one into place. If a step fails, the current version stays as it was.
 5. It records the version in `data\state.json`.
+6. If `zip_backups` is not `0`, it moves the zip to `<install_dir>\_zips\<id>\<tag>_<file>.zip` and deletes the oldest zips beyond the limit. Otherwise it deletes the zip.
 
 A verified hash proves that the file arrived intact. It does not prove that the build is safe. Only install forks whose authors you trust.
 
@@ -260,6 +264,7 @@ Most forks in the catalog are based on Eden/Eglantine and share the same user fo
 | `data\checks.json` | no | Time of the last check per fork. |
 | `data\wichforks\` | no | Local copy of the guide. |
 | `forks\` | no | Installed forks (default `install_dir`). |
+| `forks\_zips\` | no | Zip backups, when `zip_backups` is not `0`. |
 
 To update the tool itself, download the new `fork-manager.ps1`, `forks.json` and `ForkManager.cmd`, or run `git pull`. Your settings, notes and installed forks are not touched.
 
