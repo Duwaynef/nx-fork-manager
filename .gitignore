@@ -1,0 +1,6 @@
+# Local settings and runtime data
+config.json
+GAMES.md
+data/
+forks/
+*.tmp

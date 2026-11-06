@@ -1,0 +1,128 @@
+{
+  "knowledge_source": "riyadhHDA/wichforks",
+  "forks": [
+    {
+      "id": "eglantine",
+      "name": "Eglantine (Djihads80)",
+      "source": "github",
+      "repo": "Djihads80/Eglantine",
+      "tags": "^(daily-\\d+|build-\\d+)$",
+      "release_exclude": "(?i)experimental|dont use",
+      "include": "windows-x86_64.*\\.zip$",
+      "exclude": "pgo",
+      "exe": "eglantine.exe",
+      "aliases": ["Djihads80"],
+      "wichforks_id": "eglantine-upstream"
+    },
+    {
+      "id": "lichii",
+      "name": "Lichii",
+      "source": "github",
+      "repo": "zortos293/Lichii",
+      "include": "windows-x86_64.*\\.zip$",
+      "exclude": "pgo",
+      "exe": "lichii.exe",
+      "aliases": ["Lichii"],
+      "wichforks_id": "lichii"
+    },
+    {
+      "id": "lichii-git",
+      "name": "Lichii (git build)",
+      "source": "actions",
+      "repo": "zortos293/Lichii",
+      "workflow": "release-binaries.yml",
+      "branch": null,
+      "include": "^lichii-windows-x86_64-",
+      "exclude": "pgo",
+      "exe": "lichii.exe",
+      "aliases": [],
+      "wichforks_id": "lichii"
+    },
+    {
+      "id": "frizti",
+      "name": "Lichii (Frizti)",
+      "source": "github",
+      "repo": "Frizti/Lichii",
+      "include": "windows-x86_64.*\\.zip$",
+      "exclude": "symbols|pgo",
+      "exe": "lichii.exe",
+      "aliases": ["Frizti"],
+      "wichforks_id": null
+    },
+    {
+      "id": "orchid",
+      "name": "Orchid",
+      "source": "github",
+      "repo": "MythosOfs/Orchid",
+      "include": "windows-x86_64.*\\.zip$",
+      "exclude": "pgo",
+      "exe": "orchid.exe",
+      "aliases": ["Orchid"],
+      "wichforks_id": "orchid"
+    },
+    {
+      "id": "pokedinner",
+      "name": "PokeDinner",
+      "source": "forgejo",
+      "host": "git.eden-emu.dev",
+      "repo": "Franseven/PokeDinner-a-Eglantine-Fork",
+      "include": "^(.*-win64|\\d[\\d.]*[a-z]?)\\.zip$",
+      "exclude": "exe-only",
+      "exe": "eglantine.exe",
+      "aliases": ["PokeDinner"],
+      "wichforks_id": "pokedinner"
+    },
+    {
+      "id": "selevet",
+      "name": "Selevet",
+      "source": "github",
+      "repo": "sylvieistaken/selevet-eglantine",
+      "include": "windows-x86_64.*\\.zip$",
+      "exclude": "30fps",
+      "exe": "eglantine.exe",
+      "aliases": ["selevet"],
+      "wichforks_id": "selevet-eglantine"
+    },
+    {
+      "id": "smileytatsu",
+      "name": "SmileyTatsu",
+      "source": "github",
+      "repo": "SmileyTatsu/Eglantine",
+      "include": "windows-x86_64.*\\.zip$",
+      "exclude": "pgo",
+      "exe": "eglantine.exe",
+      "aliases": ["SmileyTatsu"],
+      "wichforks_id": "smileytatsu-eglantine"
+    },
+    {
+      "id": "notsapinho",
+      "name": "notsapinho",
+      "source": "github",
+      "repo": "notsapinho/Eglantine",
+      "include": "windows-x86_64.*\\.zip$",
+      "exclude": "pgo",
+      "aliases": ["notsapinho"],
+      "wichforks_id": "notsapinho-eglantine"
+    },
+    {
+      "id": "rdenno",
+      "name": "rdenno",
+      "source": "github",
+      "repo": "rdenno/Eglantine",
+      "include": "windows-x86_64.*\\.zip$",
+      "exclude": "pgo",
+      "aliases": ["rdenno"],
+      "wichforks_id": "rdenno-eglantine"
+    },
+    {
+      "id": "zendnevs",
+      "name": "ZendNevs",
+      "source": "github",
+      "repo": "ZendNevs/Eglantine-ZendNevs",
+      "include": "win64\\.zip$",
+      "exclude": "pgo",
+      "aliases": ["ZendNevs"],
+      "wichforks_id": "zendnevs-eglantine"
+    }
+  ]
+}
