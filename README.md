@@ -105,6 +105,8 @@ MSVC INSTALLED BUILDS (not your build type: no updates. d<number> removes one)
 
 The numbering continues, so `12`, `r12`, `p12` and `d12` work on them as on any fork. They get no updates. The section is hidden when everything installed matches your build type. On the command line, `-Fork orchid-pgo` always works, whatever the choice.
 
+Zip backups (`zip_backups`) are kept and counted per build, in `_zips\orchid` and `_zips\orchid-pgo`.
+
 Forks with PGO builds have `"pgo": true` in `forks.json`. A fork you add from a link gets it automatically when its releases include a Windows PGO zip.
 
 ## Add a fork from a link
@@ -228,9 +230,9 @@ The first run creates this file. It is not tracked by git, so updates of this to
 ```json
 {
   "gpu": "NVIDIA",
+  "build_type": "msvc",
   "install_dir": "forks",
   "check_interval_minutes": 60,
-  "build_type": "msvc",
   "zip_backups": 0
 }
 ```
@@ -238,10 +240,10 @@ The first run creates this file. It is not tracked by git, so updates of this to
 | Key | Meaning |
 |---|---|
 | `gpu` | `NVIDIA`, `AMD` or `Intel`. Hides guide recommendations for forks that the guide marks as not working on your GPU. Set it to `""` to turn off the filter. |
+| `build_type` | `msvc` (default), `pgo` or `both`. Which builds the menu shows and updates. The `v` key changes it. If the key is missing, `msvc` is used. |
 | `install_dir` | Where forks are installed. A relative path starts from this folder. An absolute path also works. In JSON, write backslashes twice: `"D:\\Emulators\\forks"`. |
 | `check_interval_minutes` | How often the menu checks each fork. The `u` key ignores it. |
-| `build_type` | `msvc` (default), `pgo` or `both`. Which builds the menu shows and updates. The `v` key changes it. If the key is missing, `msvc` is used. |
-| `zip_backups` | Downloaded zips to keep per fork in `<install_dir>\_zips\<id>`. `0` keeps none (default), a number keeps that many of the newest, `"all"` keeps every zip. MSVC and PGO builds count separately (`_zips\orchid`, `_zips\orchid-pgo`). The `z` key in the menu changes it. A lower number deletes the oldest extra zips right away. If the key is missing, no zips are kept. |
+| `zip_backups` | Downloaded zips to keep per fork in `<install_dir>\_zips\<id>`. `0` keeps none (default), a number keeps that many of the newest, `"all"` keeps every zip. The `z` key in the menu changes it. A lower number deletes the oldest extra zips right away. If the key is missing, no zips are kept. |
 
 ### forks.json (the fork catalog)
 
