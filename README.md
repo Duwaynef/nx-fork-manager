@@ -85,11 +85,11 @@ Press `v` in the menu to choose:
 
 A PGO build is a separate fork entry with its own id (`<id>-pgo`, for example `orchid-pgo`), its own folder (`<install_dir>\orchid-pgo`), its own version, rollback and pin. So it never replaces the MSVC build, and both can be installed side by side.
 
-Updates follow the choice. Once any build of a fork is installed, the next update (`u`, or the check when the menu starts) installs and updates every build of that fork the menu shows. Forks you never opened stay uninstalled.
+Updates follow the choice. The check when the menu opens updates the builds you already have, and lists the builds of your build type that the forks you use do not have yet. It never downloads those by itself: `u` (or `-Action Update`) installs them and then keeps every build of that fork the menu shows up to date. Opening a build also installs it. Forks you never opened stay uninstalled.
 
 When you change the build type with `v`, the tool:
 
-1. Lists the builds of the new type that the forks you use do not have yet, and offers to download them now. If you say no, they download on the next update.
+1. Lists the builds of the new type that the forks you use do not have yet, and offers to download them now. If you say no, nothing is downloaded until you press `u` (or open one of them). The check when the menu opens reminds you which are missing, but does not download them.
 2. Lists the installed builds of the type you no longer selected, and offers to remove them. It removes a build only when the fork has a build of the new type installed. Otherwise the fork would have nothing installed and would stop getting updates, so that build is kept.
 
 Installed builds outside your build type appear in their own section under the fork list, for example:

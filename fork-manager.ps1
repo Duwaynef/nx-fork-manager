@@ -708,11 +708,17 @@ function Get-ForkByNumber([string]$Number) {
 function Get-VariantLabel($F) { if ($F.variant -eq 'pgo') { return 'PGO' } return 'MSVC' }
 
 # Updates touch forks you use only. A fork is installed the first time you open it.
-# Once any build of a fork (MSVC or PGO) is installed, every build that build_type shows is kept
-# up to date, so switching to "both" or "pgo" downloads the missing build on the next update.
+# Once any build of a fork (MSVC or PGO) is installed, every build that build_type shows belongs to the forks
+# you use. An update you ask for (u, -Action Update) installs the ones still missing, for example after
+# switching to "both" or "pgo". The automatic check when the menu opens only updates installed builds
+# (Get-MissingBuilds lists the rest), so it never starts a large download you did not ask for.
 function Get-InstalledForks($State) {
     $used = @($script:AllForks | Where-Object { Test-Installed $State $_ } | ForEach-Object { $_.base_id })
     return @($script:Catalog.forks | Where-Object { $used -contains $_.base_id })
+}
+
+function Get-MissingBuilds($State) {
+    return @(Get-InstalledForks $State | Where-Object { -not (Test-Installed $State $_) })
 }
 
 # --- releases ------------------------------------------------------------------------------------
@@ -1497,11 +1503,11 @@ function Remove-Build($F) {
 function Switch-BuildType([string]$Value) {
     Set-BuildType $Value
     $state = Get-State
-    $missing = @(Get-InstalledForks $state | Where-Object { -not (Test-Installed $state $_) })
+    $missing = @(Get-MissingBuilds $state)
     if ($missing.Count) {
         Write-Host "Not installed yet for the forks you use: $(($missing | ForEach-Object name) -join ', ')."
         if ((Read-Host 'Download them now? (y/n)').Trim().ToLower() -eq 'y') { [void](Update-Forks $missing) }
-        else { Write-Host 'They download on the next update (u).' }
+        else { Write-Host 'Not downloaded. Press u when you want them: the check when the menu opens does not download them.' }
     }
     $state = Get-State
     $hidden = @(Get-HiddenInstalled $state)
@@ -1595,7 +1601,13 @@ function Invoke-Menu {
     Write-Host 'Checking the guide and installed forks...'
     try { if (Sync-Knowledge $false) { Write-Host 'Guide updated.' } }
     catch { Write-Warning "Guide sync failed, using the local copy: $($_.Exception.Message)" }
-    [void](Update-Forks (Get-InstalledForks (Get-State)) $false)
+    # Only builds you already have. Builds of a newly selected type wait for u (or for opening them).
+    $state = Get-State
+    [void](Update-Forks @(Get-InstalledForks $state | Where-Object { Test-Installed $state $_ }) $false)
+    $missing = @(Get-MissingBuilds (Get-State))
+    if ($missing.Count) {
+        Write-Host "Not downloaded yet for your build type ($(Get-BuildTypeLabel)): $(($missing | ForEach-Object name) -join ', '). Press u to download them."
+    }
     Write-Base
 
     while ($true) {
