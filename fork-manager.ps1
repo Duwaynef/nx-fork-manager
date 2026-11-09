@@ -67,6 +67,7 @@ function Get-Config {
             check_interval_minutes = 60
             build_type             = 'msvc'
             zip_backups            = 0
+            nx2_switches           = @()
         }
         Write-JsonFile $script:ConfigFile $cfg
         $shown = if ($cfg.gpu) { $cfg.gpu } else { 'not detected (no GPU filter)' }
@@ -331,6 +332,349 @@ function Set-ZipBackups([string]$Value) {
         if (-not (Get-ChildItem -LiteralPath $script:ZipDir -Force)) { Remove-Managed $script:ZipDir }
     }
     Write-Host "Zip backups: $(Get-ZipBackupLabel)."
+}
+
+# --- custom NX2 switches -------------------------------------------------------------------------
+# config.json "nx2_switches": a list of { name, value, enabled }. Every installed fork's nx2_switches.txt
+# is rebuilt from a one-time backup of the file as shipped (nx2_switches.original.txt) plus the enabled
+# switches: a NAME=... line already set in the file gets the new value, any other switch is added at the
+# end under "## CUSTOM nx-fork-manager ##". Disabling a switch therefore restores the shipped value.
+
+$script:Nx2File = 'nx2_switches.txt'
+$script:Nx2Backup = 'nx2_switches.original.txt'
+$script:Nx2Start = '## CUSTOM nx-fork-manager ##'
+$script:Nx2End = '## END CUSTOM nx-fork-manager ##'
+
+function Get-Nx2Switches {
+    $p = $script:Config.PSObject.Properties['nx2_switches']
+    if (-not $p -or -not $p.Value) { return @() }
+    return @($p.Value)
+}
+
+function Save-Nx2Switches($List) {
+    Set-Prop $script:Config 'nx2_switches' @($List)
+    Write-JsonFile $script:ConfigFile $script:Config
+}
+
+# Switch descriptions come from the comments in nx2_switches.txt lines (a pasted block or a fork's file).
+# A comment block describes the run of NAME= lines right under it, also disabled ones (#NAME=1).
+# A blank line ends a block. Returns a hashtable name -> description.
+function Read-Nx2Comments([string[]]$Lines) {
+    $notes = @{}
+    $block = New-Object Collections.ArrayList
+    $inRun = $false
+    foreach ($raw in $Lines) {
+        $l = ([string]$raw).Trim()
+        # This tool's own lines are not descriptions.
+        if ($l -match '^##|nx-fork-manager') { $block.Clear(); $inRun = $false; continue }
+        if ($l -cmatch '^#?\s*([A-Z][A-Z0-9]*_[A-Z0-9_]+)\s*=') {
+            $n = $Matches[1]
+            if ($block.Count -and -not $notes.ContainsKey($n)) { $notes[$n] = ($block -join ' ') }
+            $inRun = $true
+            continue
+        }
+        if ($l -match '^#\s*(.*)$') {
+            # A comment after a run of switches starts a new block.
+            if ($inRun) { $block.Clear(); $inRun = $false }
+            $t = $Matches[1].Trim()
+            # Section headers such as "--- limits / tuning ---" are not descriptions.
+            if ($t -and $t -notmatch '^-{2,}') { [void]$block.Add($t) }
+            continue
+        }
+        $block.Clear()
+        $inRun = $false
+    }
+    return $notes
+}
+
+# Descriptions from the files of every installed fork (the shipped copy when one was kept).
+function Get-Nx2KnownNotes {
+    $notes = @{}
+    if (-not (Test-Path -LiteralPath $script:ForksDir)) { return $notes }
+    foreach ($d in @(Get-ChildItem -LiteralPath $script:ForksDir -Directory | Where-Object { $_.Name -notlike '_*' })) {
+        $file = Join-Path $d.FullName $script:Nx2Backup
+        if (-not (Test-Path -LiteralPath $file)) { $file = Join-Path $d.FullName $script:Nx2File }
+        if (-not (Test-Path -LiteralPath $file)) { continue }
+        $found = Read-Nx2Comments ([IO.File]::ReadAllLines($file))
+        foreach ($k in $found.Keys) { if (-not $notes.ContainsKey($k)) { $notes[$k] = $found[$k] } }
+    }
+    return $notes
+}
+
+# Fills in missing descriptions from the installed forks. Descriptions you wrote are never replaced,
+# and one you cleared (stored as "") stays empty.
+function Complete-Nx2Notes {
+    $list = @(Get-Nx2Switches)
+    $missing = @($list | Where-Object { $null -eq $_.note })
+    if (-not $missing.Count) { return }
+    $known = Get-Nx2KnownNotes
+    $changed = $false
+    foreach ($s in $missing) {
+        if ($known.ContainsKey($s.name)) { Set-Prop $s 'note' $known[$s.name]; $changed = $true }
+    }
+    if ($changed) { Save-Nx2Switches $list }
+}
+
+function Set-Nx2Note($Switch, [string]$Text) {
+    $list = @(Get-Nx2Switches)
+    $s = $list | Where-Object { $_.name -eq $Switch.name } | Select-Object -First 1
+    $value = if ($Text.Trim() -eq '-') { '' } else { $Text.Trim() }
+    Set-Prop $s 'note' $value
+    Save-Nx2Switches $list
+    if ($value) { Write-Host "Description of $($s.name) saved." } else { Write-Host "Description of $($s.name) cleared." }
+}
+
+# One list line: number, state, NAME=VALUE, then the description cut to the window width.
+function Format-Nx2Line([int]$Number, $Switch, [int]$Pad) {
+    $mark = if ($Switch.enabled) { 'on ' } else { 'off' }
+    $head = '  {0,2}  [{1}]  {2}' -f $Number, $mark, "$($Switch.name)=$($Switch.value)".PadRight($Pad)
+    if (-not $Switch.note) { return $head.TrimEnd() }
+    $width = 120
+    try { if ([Console]::WindowWidth -gt 40) { $width = [Console]::WindowWidth } } catch { }
+    $room = $width - $head.Length - 3
+    $note = [string]$Switch.note
+    if ($room -lt 12) { return $head.TrimEnd() }
+    if ($note.Length -gt $room) { $note = $note.Substring(0, $room - 3).TrimEnd() + '...' }
+    return "$head  $note"
+}
+
+# Accepts "NAME=VALUE". Adding a name you already have updates its value and turns it on.
+function Add-Nx2Switch([string]$Text) {
+    $Text = $Text.Trim()
+    if ($Text -notmatch '^#?\s*([A-Za-z_][A-Za-z0-9_]*)\s*=\s*(.*)$') { throw 'Type the switch as NAME=VALUE, for example EDEN_NX2_PRELOAD_ALL_PIPELINES=1.' }
+    $name = $Matches[1]
+    $value = $Matches[2].Trim()
+    if ($value -eq '') { throw "$name needs a value, for example $name=1." }
+    $list = @(Get-Nx2Switches)
+    $existing = $list | Where-Object { $_.name -eq $name } | Select-Object -First 1
+    if ($existing) {
+        Set-Prop $existing 'value' $value
+        Set-Prop $existing 'enabled' $true
+        Write-Host "Updated $name=$value (on)."
+    }
+    else {
+        $list += [pscustomobject]@{ name = $name; value = $value; enabled = $true }
+        Write-Host "Added $name=$value (on)."
+    }
+    Save-Nx2Switches $list
+}
+
+# Adds many switches at once, for example lines copied from an nx2_switches.txt.
+# Blank lines and comment lines (# ..., including disabled examples like #NAME=1) are skipped.
+# The comment above a switch becomes its description, unless it already has one.
+# Returns $true when a switch value changed, so the forks need the new switches.
+function Add-Nx2Lines([string[]]$Lines) {
+    $list = New-Object Collections.ArrayList
+    foreach ($s in @(Get-Nx2Switches)) { [void]$list.Add($s) }
+    $notes = Read-Nx2Comments $Lines
+    $added = 0; $updated = 0; $same = 0; $described = 0
+    $skipped = New-Object Collections.ArrayList
+    foreach ($raw in $Lines) {
+        $line = ([string]$raw).Trim()
+        if (-not $line -or $line.StartsWith('#')) { continue }
+        if ($line -notmatch '^([A-Za-z_][A-Za-z0-9_]*)\s*=\s*(\S.*)$') { [void]$skipped.Add($line); continue }
+        $name = $Matches[1]
+        $value = $Matches[2].Trim()
+        $note = if ($notes.ContainsKey($name)) { $notes[$name] } else { $null }
+        $existing = $list | Where-Object { $_.name -eq $name } | Select-Object -First 1
+        if (-not $existing) {
+            [void]$list.Add([pscustomobject]@{ name = $name; value = $value; enabled = $true; note = $note })
+            $added++
+            continue
+        }
+        if ($note -and $null -eq $existing.note) { Set-Prop $existing 'note' $note; $described++ }
+        if ($existing.value -ceq $value -and $existing.enabled) { $same++ }
+        else {
+            Set-Prop $existing 'value' $value
+            Set-Prop $existing 'enabled' $true
+            $updated++
+        }
+    }
+    $msg = "Added $added, updated $updated, already set $same."
+    if ($described) { $msg += " Descriptions added to $described you already had." }
+    Write-Host $msg
+    if ($skipped.Count) {
+        Write-Warning "Skipped $($skipped.Count) line(s) that are not NAME=VALUE: $($skipped -join ' | ')"
+    }
+    if ($added + $updated + $described) { Save-Nx2Switches @($list) }
+    return [bool]($added + $updated)
+}
+
+# Rebuilds one fork's nx2_switches.txt. Returns $null when the fork has no such file.
+function Update-Nx2File([string]$Dir) {
+    $file = Join-Path $Dir $script:Nx2File
+    $backup = Join-Path $Dir $script:Nx2Backup
+    if (-not (Test-Path -LiteralPath $file)) { return $null }
+    # Not using the feature: leave the fork folder alone.
+    if (-not @(Get-Nx2Switches).Count -and -not (Test-Path -LiteralPath $backup)) {
+        return [pscustomobject]@{ written = $false; changed = 0; added = 0; same = 0 }
+    }
+    # The first time, the file as it is now becomes the original.
+    if (-not (Test-Path -LiteralPath $backup)) { Copy-Item -LiteralPath $file -Destination $backup }
+    $text = [IO.File]::ReadAllText($backup)
+    $nl = if ($text.Contains("`r`n")) { "`r`n" } else { "`n" }
+    $lines = New-Object Collections.Generic.List[string]
+    foreach ($l in ($text -split '\r?\n')) { $lines.Add($l) }
+    while ($lines.Count -and $lines[$lines.Count - 1].Trim() -eq '') { $lines.RemoveAt($lines.Count - 1) }
+
+    $changed = New-Object Collections.ArrayList
+    $added = New-Object Collections.ArrayList
+    $same = 0
+    foreach ($s in @(Get-Nx2Switches | Where-Object { $_.enabled })) {
+        $line = "$($s.name)=$($s.value)"
+        # Only active lines count as set; "#NAME=..." is a commented-out example.
+        $pattern = '^\s*' + [regex]::Escape($s.name) + '\s*='
+        $found = $false
+        for ($i = 0; $i -lt $lines.Count; $i++) {
+            if ($lines[$i] -notmatch $pattern) { continue }
+            $found = $true
+            if ($lines[$i].Trim() -eq $line) { $same++; continue }
+            $old = $lines[$i].Trim()
+            $lines[$i] = $line
+            $lines.Insert($i, "# nx-fork-manager: was $old")
+            $i++
+            [void]$changed.Add($s.name)
+        }
+        if (-not $found) { [void]$added.Add($line) }
+    }
+    if ($added.Count) {
+        $lines.Add('')
+        $lines.Add($script:Nx2Start)
+        foreach ($l in $added) { $lines.Add($l) }
+        $lines.Add($script:Nx2End)
+    }
+    # Nothing to change: the file is exactly the original, byte for byte.
+    $out = if ($changed.Count -or $added.Count) { ($lines -join $nl) + $nl } else { $text }
+    $written = $out -cne [IO.File]::ReadAllText($file)
+    if ($written) { [IO.File]::WriteAllText($file, $out, $script:Utf8) }
+    return [pscustomobject]@{ written = $written; changed = $changed.Count; added = $added.Count; same = $same }
+}
+
+function Get-Nx2Summary($Result) {
+    $parts = @()
+    if ($Result.changed) { $parts += "$($Result.changed) overwritten" }
+    if ($Result.added) { $parts += "$($Result.added) added" }
+    if ($Result.same) { $parts += "$($Result.same) already set" }
+    if (-not $parts.Count) { return 'original file (no switches on)' }
+    return $parts -join ', '
+}
+
+# Called after an install or a rollback. A problem here is only a warning: the fork itself is fine.
+function Update-Nx2Fork($F, [string]$Indent = '  ') {
+    try {
+        $r = Update-Nx2File (Get-ForkDir $F.id)
+        if ($null -eq $r) {
+            if (@(Get-Nx2Switches).Count) { Write-Host "$($Indent)NX2 switches: $($F.name) has no $script:Nx2File, skipped." }
+            return
+        }
+        if ($r.written -or @(Get-Nx2Switches | Where-Object { $_.enabled }).Count) {
+            Write-Host "$($Indent)NX2 switches: $(Get-Nx2Summary $r) (original kept as $script:Nx2Backup)."
+        }
+    }
+    catch { Write-Warning "$($F.name): could not update ${script:Nx2File}: $($_.Exception.Message)" }
+}
+
+# Applies the current switches to every installed fork.
+function Update-Nx2All {
+    $state = Get-State
+    $any = $false
+    $written = $false
+    # When the catalog keeps a separate list of every installed-capable entry ($script:AllForks), use it,
+    # so installed entries the menu does not show get the switches too.
+    $forks = if ($script:AllForks) { $script:AllForks } else { $script:Catalog.forks }
+    foreach ($f in $forks) {
+        if (-not (Test-Installed $state $f)) { continue }
+        $any = $true
+        try {
+            $r = Update-Nx2File (Get-ForkDir $f.id)
+            if ($null -eq $r) { Write-Host ('  {0,-30} no {1}, skipped' -f $f.name, $script:Nx2File); continue }
+            $note = if ($r.written) { 'updated' } else { 'no change' }
+            if ($r.written) { $written = $true }
+            Write-Host ('  {0,-30} {1}: {2}' -f $f.name, $note, (Get-Nx2Summary $r))
+        }
+        catch { Write-Warning "$($f.name): $($_.Exception.Message)" }
+    }
+    if (-not $any) { Write-Host '  No forks installed yet. Switches are applied when a fork is installed.' }
+    elseif ($written) { Write-Host '  Restart a running emulator to load the new switches.' }
+}
+
+function Invoke-Nx2Menu {
+    while ($true) {
+        # Switches without a description get one from the installed forks' files, when they have it.
+        try { Complete-Nx2Notes } catch { Write-Warning "Could not read switch descriptions: $($_.Exception.Message)" }
+        $list = @(Get-Nx2Switches)
+        Write-Host ''
+        Write-Host "MY NX2 SWITCHES (written to $script:Nx2File of every installed fork)"
+        if (-not $list.Count) { Write-Host '  none yet' }
+        $pad = 0
+        foreach ($s in $list) { $pad = [Math]::Max($pad, "$($s.name)=$($s.value)".Length) }
+        $pad = [Math]::Min($pad, 44)
+        for ($i = 0; $i -lt $list.Count; $i++) { Write-Host (Format-Nx2Line ($i + 1) $list[$i] $pad) }
+        Write-Host ''
+        Write-Host '  a    add or change one switch (NAME=VALUE)   p  paste several   c  add all from the clipboard'
+        Write-Host '  1    turn switch 1 on or off   x1  delete switch 1   r  re-apply to all forks'
+        Write-Host '  i1   show switch 1 in full   n1  write your own description for switch 1   Enter  back'
+        $choice = (Read-Host 'Switches').Trim().ToLower()
+        try {
+            if ($choice -eq '') { return }
+            elseif ($choice -match '^([in])(\d+)$') {
+                $i = [int]$Matches[2]
+                if ($i -lt 1 -or $i -gt $list.Count) { throw "No switch number $i." }
+                $s = $list[$i - 1]
+                if ($Matches[1] -eq 'i') {
+                    Write-Host ''
+                    Write-Host "  $($s.name)=$($s.value)   ($(if ($s.enabled) { 'on' } else { 'off' }))"
+                    Write-Host "  $(if ($s.note) { $s.note } else { 'No description. Add one with n' + $i + '.' })"
+                }
+                else {
+                    if ($s.note) { Write-Host "Now: $($s.note)" }
+                    $text = Read-Host "Description for $($s.name) (Enter = keep, - = clear)"
+                    if ($text.Trim()) { Set-Nx2Note $s $text }
+                }
+            }
+            elseif ($choice -eq 'p') {
+                # A blank line cannot end the paste: copied switch files contain blank lines.
+                Write-Host 'Paste the lines, then type end on its own line and press Enter.'
+                Write-Host 'Blank lines and comment lines (#) are skipped.'
+                $lines = New-Object Collections.ArrayList
+                while ($true) {
+                    $l = Read-Host
+                    if ($l.Trim() -ieq 'end') { break }
+                    [void]$lines.Add($l)
+                }
+                if (Add-Nx2Lines $lines.ToArray()) { Update-Nx2All }
+            }
+            elseif ($choice -eq 'c') {
+                $clip = @(Get-Clipboard)
+                if (-not ($clip -join '').Trim()) { throw 'The clipboard is empty. Copy the switch lines first.' }
+                if (Add-Nx2Lines $clip) { Update-Nx2All }
+            }
+            elseif ($choice -eq 'a') {
+                $text = Read-Host 'Switch (NAME=VALUE)'
+                if (-not $text.Trim()) { continue }
+                Add-Nx2Switch $text
+                Update-Nx2All
+            }
+            elseif ($choice -eq 'r') { Update-Nx2All }
+            elseif ($choice -match '^(x?)(\d+)$') {
+                $i = [int]$Matches[2]
+                if ($i -lt 1 -or $i -gt $list.Count) { throw "No switch number $i." }
+                $s = $list[$i - 1]
+                if ($Matches[1]) {
+                    $list = @($list | Where-Object { $_.name -ne $s.name })
+                    Write-Host "Deleted $($s.name)."
+                }
+                else {
+                    Set-Prop $s 'enabled' (-not $s.enabled)
+                    Write-Host "$($s.name) is now $(if ($s.enabled) { 'on' } else { 'off' })."
+                }
+                Save-Nx2Switches $list
+                Update-Nx2All
+            }
+            else { Write-Warning 'Unknown choice.' }
+        }
+        catch { Write-Warning $_.Exception.Message }
+    }
 }
 
 function Test-Installed($State, $F) {
@@ -613,6 +957,8 @@ function Install-Release($F, $Info) {
             })
         Write-JsonFile $script:StateFile $state
         Write-Host "  OK: $($F.name) is now on $($Info.release.tag)."
+        # The new version ships a fresh nx2_switches.txt: back it up and apply your switches.
+        Update-Nx2Fork $F
         # The install already succeeded: a backup problem is only a warning.
         try { Save-ZipBackup $F $zip $Info }
         catch { Write-Warning "Could not keep the zip of $($F.name): $($_.Exception.Message)" }
@@ -651,6 +997,8 @@ function Restore-Previous($F) {
     Set-Prop $state $F.id $restored
     Write-JsonFile $script:StateFile $state
     Write-Host "OK: $($F.name) is back on $($restored.tag) and pinned. Unpin it to get updates again."
+    # Your switches may have changed since that version was installed.
+    Update-Nx2Fork $F ''
 }
 
 function Update-Forks($Forks, [bool]$Force = $true) {
@@ -1259,6 +1607,8 @@ function Invoke-Menu {
         Write-Host '  d4   delete the installed files of build 4 (it stays in the list)'
         Write-Host "  v    build type: MSVC, PGO or both (now: $(Get-BuildTypeLabel))"
         Write-Host "  z    zip backups (now: $(Get-ZipBackupLabel))"
+        $on = @(Get-Nx2Switches | Where-Object { $_.enabled }).Count
+        Write-Host "  s    my NX2 switches for nx2_switches.txt ($on on)"
         Write-Host '  u    update now   b  open GAMES.md   q  quit'
         $choice = (Read-Host 'Choice').Trim().ToLower()
         try {
@@ -1286,6 +1636,7 @@ function Invoke-Menu {
                 [void](Update-Forks (Get-InstalledForks (Get-State)))
                 Write-Base
             }
+            elseif ($choice -eq 's') { Invoke-Nx2Menu }
             elseif ($choice -eq 'z') {
                 Write-Host "Downloaded zips are kept in $script:ZipDir\<fork>. Now: $(Get-ZipBackupLabel)."
                 $value = Read-Host 'Zips to keep per fork: 0 = none, a number, or all (Enter = no change)'

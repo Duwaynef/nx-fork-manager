@@ -66,6 +66,7 @@ GAMES
 | `z` | Sets how many downloaded zips to keep per fork: `0` (none), a number, or `all`. See `zip_backups` in [config.json](#configjson-your-settings). |
 | `u` | Checks for updates now, ignoring the check interval. |
 | `b` | Opens `GAMES.md`, the full table with evidence from the guide and your notes. |
+| `s` | Your NX2 switches: add, turn on or off, delete. See [Custom NX2 switches](#custom-nx2-switches). |
 | `q` | Quits. |
 
 Only installed forks get updates. A fork you never opened does not use disk space or API requests.
@@ -132,6 +133,55 @@ Forks you add get a `*` in the menu. `my-forks.json` is not tracked by git, so u
 If the tool picks the wrong file, or the fork renames its files later, edit the `include` and `exclude` rules in `my-forks.json`. The keys are the same as in `forks.json` (see [forks.json](#forksjson-the-fork-catalog)).
 
 If a fork has no Windows build yet, the tool says so and adds nothing. Try again after the author publishes one.
+
+## Custom NX2 switches
+
+Most forks ship an `nx2_switches.txt` next to the exe: one `NAME=VALUE` per line, read at every start. An update replaces it with the fork's new version. With `s` in the menu you keep a list of switches that the tool writes into the `nx2_switches.txt` of every installed fork, again after every update.
+
+```
+MY NX2 SWITCHES (written to nx2_switches.txt of every installed fork)
+   1  [on ]  EDEN_NX2_ASYNC_SKIP=0               Pipelines still building are waited for instead of skipped.
+   2  [on ]  EDEN_NX2_PRELOAD_ALL_PIPELINES=1
+   3  [off]  EDEN_NX2_SPLIT=2                    Offload GPU method/macro execution to the back thread (SPLIT=2 deli...
+
+  a    add or change one switch (NAME=VALUE)   p  paste several   c  add all from the clipboard
+  1    turn switch 1 on or off   x1  delete switch 1   r  re-apply to all forks
+  i1   show switch 1 in full   n1  write your own description for switch 1   Enter  back
+```
+
+Each switch can have a description, shown next to it and cut to the window width (`i1` shows it in full). It comes from:
+
+1. The comment above the switch in what you paste or copy (`p`, `c`). A comment above several lines describes all of them.
+2. Otherwise, the comment above that switch in the `nx2_switches.txt` of your installed forks (the shipped copy). This is read from disk: no GitHub requests.
+3. Your own text: `n1` writes or replaces the description of switch 1, and `-` clears it. A description you wrote or cleared is never replaced.
+
+There is no complete official list of switches. The forks' `NX2_NOTES.md` files explain some older ones.
+
+To add many switches at once, for example lines copied from another fork's `nx2_switches.txt`:
+
+- `p`: paste the lines, then type `end` on its own line. (A blank line cannot end the paste, because switch files contain blank lines.)
+- `c`: copy the lines first, then press `c`. The tool reads the clipboard, nothing to paste.
+
+Blank lines and comment lines are skipped, also disabled examples such as `#EDEN_NX2_SPLIT=1`. A name you already have gets the new value and is turned on. Lines that are not `NAME=VALUE` are listed in a warning and skipped.
+
+For each switch that is on:
+
+- If the file already sets it (an active `NAME=...` line), the tool writes your value there and keeps the old line as a comment: `# nx-fork-manager: was EDEN_NX2_ASYNC_SKIP=0`.
+- Otherwise it adds the line at the end of the file:
+
+  ```
+  ## CUSTOM nx-fork-manager ##
+  EDEN_NX2_PRELOAD_ALL_PIPELINES=1
+  ## END CUSTOM nx-fork-manager ##
+  ```
+
+  A commented-out example such as `#EDEN_NX2_SPLIT=1` does not count as set, so it stays as it is.
+
+The first time, the tool copies the file as shipped to `nx2_switches.original.txt` in the same folder. It always builds `nx2_switches.txt` from that copy plus the switches that are on. So turning a switch off restores the fork's own value, and with every switch off the file is exactly the original again. Do not edit `nx2_switches.txt` by hand in a fork folder: the next change of your switches overwrites it. A fork without `nx2_switches.txt` is skipped.
+
+Changes apply to every installed fork right away. Restart a running emulator to load them. Your list is saved in `config.json` (`nx2_switches`). As long as the list is empty, the tool does not touch any fork folder.
+
+The forks also read `%APPDATA%\eden\nx2_switches.txt`, and a value there wins over the fork's file. If a switch has no effect, check that file.
 
 ## Command line
 
@@ -233,7 +283,8 @@ The first run creates this file. It is not tracked by git, so updates of this to
   "build_type": "msvc",
   "install_dir": "forks",
   "check_interval_minutes": 60,
-  "zip_backups": 0
+  "zip_backups": 0,
+  "nx2_switches": []
 }
 ```
 
@@ -244,6 +295,7 @@ The first run creates this file. It is not tracked by git, so updates of this to
 | `install_dir` | Where forks are installed. A relative path starts from this folder. An absolute path also works. In JSON, write backslashes twice: `"D:\\Emulators\\forks"`. |
 | `check_interval_minutes` | How often the menu checks each fork. The `u` key ignores it. |
 | `zip_backups` | Downloaded zips to keep per fork in `<install_dir>\_zips\<id>`. `0` keeps none (default), a number keeps that many of the newest, `"all"` keeps every zip. The `z` key in the menu changes it. A lower number deletes the oldest extra zips right away. If the key is missing, no zips are kept. |
+| `nx2_switches` | Your NX2 switches, each `{ "name", "value", "enabled", "note" }` (`note` is the description). Easiest to change with `s` in the menu. See [Custom NX2 switches](#custom-nx2-switches). |
 
 ### forks.json (the fork catalog)
 
@@ -288,6 +340,7 @@ If you add a fork that others can use too, please open a pull request.
 4. It moves the current version to `<install_dir>\_previous\<id>` and moves the new one into place. If a step fails, the current version stays as it was.
 5. It records the version in `data\state.json`.
 6. If `zip_backups` is not `0`, it moves the zip to `<install_dir>\_zips\<id>\<tag>_<file>.zip` and deletes the oldest zips beyond the limit. Otherwise it deletes the zip.
+7. If you have NX2 switches, it copies the new `nx2_switches.txt` to `nx2_switches.original.txt` and writes your switches into `nx2_switches.txt`.
 
 A verified hash proves that the file arrived intact. It does not prove that the build is safe. Only install forks whose authors you trust.
 
@@ -309,6 +362,7 @@ Most forks in the catalog are based on Eden/Eglantine and share the same user fo
 | `data\wichforks\` | no | Local copy of the guide. |
 | `forks\` | no | Installed forks (default `install_dir`). |
 | `forks\_zips\` | no | Zip backups, when `zip_backups` is not `0`. |
+| `forks\<id>\nx2_switches.original.txt` | no | The fork's `nx2_switches.txt` as shipped, when you use NX2 switches. |
 
 To update the tool itself, download the new `fork-manager.ps1`, `forks.json` and `ForkManager.cmd`, or run `git pull`. Your settings, notes and installed forks are not touched.
 
