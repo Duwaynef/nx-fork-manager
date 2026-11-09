@@ -1324,8 +1324,11 @@ function Read-JobStreams {
     }
     while ($j.Warn -lt $s.Warning.Count) { Add-Log $s.Warning[$j.Warn].Message 'warn'; $j.Warn++ }
     while ($j.Err -lt $s.Error.Count) {
-        $text = [string]$s.Error[$j.Err]
+        $rec = $s.Error[$j.Err]
         $j.Err++
+        # A native program's stderr line arrives as an error record holding the line in TargetObject.
+        # The first one wraps an empty line and prints as "System.Management.Automation.RemoteException".
+        $text = if ($rec.FullyQualifiedErrorId -like 'NativeCommandError*') { [string]$rec.TargetObject } else { [string]$rec }
         # curl writes its progress bar to stderr; it is noise here, the bar below shows the same.
         if ($text -match '^[#=\-\s\d.,%O]*$') { continue }
         Add-Log $text 'error'
