@@ -61,12 +61,53 @@ GAMES
 | `p1` | Pins or unpins fork 1. A pinned fork does not get updates. |
 | `a` | Adds a fork from a link. See [Add a fork from a link](#add-a-fork-from-a-link). |
 | `x12` | Removes fork 12 and its installed files. This works only for forks you added. |
+| `d4` | Deletes the installed files of build 4 (current and previous version). The fork stays in the list, so you can install it again by opening it. Works for every fork. Its zip backups stay. |
+| `v` | Chooses the build type: MSVC (standard), PGO, or both. See [MSVC and PGO builds](#msvc-and-pgo-builds). |
 | `z` | Sets how many downloaded zips to keep per fork: `0` (none), a number, or `all`. See `zip_backups` in [config.json](#configjson-your-settings). |
 | `u` | Checks for updates now, ignoring the check interval. |
 | `b` | Opens `GAMES.md`, the full table with evidence from the guide and your notes. |
 | `q` | Quits. |
 
 Only installed forks get updates. A fork you never opened does not use disk space or API requests.
+
+## MSVC and PGO builds
+
+Some forks publish two Windows builds of each release: the standard MSVC build (`...-windows-x86_64.zip`) and a PGO build (`...-windows-x86_64-pgo.zip`). A PGO build is optimized with a recorded profile of real use. It is often faster, but it is a different binary, so test it before you rely on it.
+
+Press `v` in the menu to choose:
+
+| Choice | Menu shows |
+|---|---|
+| `m` MSVC (default) | The standard build of every fork. |
+| `p` PGO | The PGO build of forks that publish one, for example `Orchid (PGO)`. Forks without a PGO build show their standard build. |
+| `b` both | Both builds as separate entries. |
+
+A PGO build is a separate fork entry with its own id (`<id>-pgo`, for example `orchid-pgo`), its own folder (`<install_dir>\orchid-pgo`), its own version, rollback and pin. So it never replaces the MSVC build, and both can be installed side by side.
+
+Updates follow the choice. Once any build of a fork is installed, the next update (`u`, or the check when the menu starts) installs and updates every build of that fork the menu shows. Forks you never opened stay uninstalled.
+
+When you change the build type with `v`, the tool:
+
+1. Lists the builds of the new type that the forks you use do not have yet, and offers to download them now. If you say no, they download on the next update.
+2. Lists the installed builds of the type you no longer selected, and offers to remove them. It removes a build only when the fork has a build of the new type installed. Otherwise the fork would have nothing installed and would stop getting updates, so that build is kept.
+
+Installed builds outside your build type appear in their own section under the fork list, for example:
+
+```
+FORKS (builds: PGO)
+   1  Eglantine (Djihads80) (PGO)    daily-20261106
+   ...
+  11  ZendNevs                       not installed
+
+MSVC INSTALLED BUILDS (not your build type: no updates. d<number> removes one)
+  12  Orchid                         v0.7.5
+```
+
+The numbering continues, so `12`, `r12`, `p12` and `d12` work on them as on any fork. They get no updates. The section is hidden when everything installed matches your build type. On the command line, `-Fork orchid-pgo` always works, whatever the choice.
+
+Zip backups (`zip_backups`) are kept and counted per build, in `_zips\orchid` and `_zips\orchid-pgo`.
+
+Forks with PGO builds have `"pgo": true` in `forks.json`. A fork you add from a link gets it automatically when its releases include a Windows PGO zip.
 
 ## Add a fork from a link
 
@@ -80,7 +121,7 @@ A new fork came out and it is not in the list? Type `a` in the menu and paste it
 
 The tool then:
 
-1. Reads the newest releases (or the newest successful Actions runs) and picks the Windows `.zip`. It prefers MSVC builds and skips Linux, macOS, Android, ARM, PGO, debug and symbol files.
+1. Reads the newest releases (or the newest successful Actions runs) and picks the Windows `.zip`. It prefers MSVC builds and skips Linux, macOS, Android, ARM, debug and symbol files. If there is also a Windows PGO zip, it saves a second rule for it (`pgo_include`), so the fork also gets a PGO entry.
 2. Turns the file name into a rule that also matches future builds. For example, `selevet-eglantine-performance-7-windows-x86_64.zip` becomes `^selevet-eglantine-performance-\d+[a-z]?-windows-x\d+[a-z]?_\d+[a-z]?\.zip$`.
 3. Checks that the rule finds the same build, and saves the fork in `my-forks.json`.
 4. If the wichforks guide knows the fork, takes its name and id, so the fork shows up in the game recommendations and the GPU filter.
@@ -189,6 +230,7 @@ The first run creates this file. It is not tracked by git, so updates of this to
 ```json
 {
   "gpu": "NVIDIA",
+  "build_type": "msvc",
   "install_dir": "forks",
   "check_interval_minutes": 60,
   "zip_backups": 0
@@ -198,6 +240,7 @@ The first run creates this file. It is not tracked by git, so updates of this to
 | Key | Meaning |
 |---|---|
 | `gpu` | `NVIDIA`, `AMD` or `Intel`. Hides guide recommendations for forks that the guide marks as not working on your GPU. Set it to `""` to turn off the filter. |
+| `build_type` | `msvc` (default), `pgo` or `both`. Which builds the menu shows and updates. The `v` key changes it. If the key is missing, `msvc` is used. |
 | `install_dir` | Where forks are installed. A relative path starts from this folder. An absolute path also works. In JSON, write backslashes twice: `"D:\\Emulators\\forks"`. |
 | `check_interval_minutes` | How often the menu checks each fork. The `u` key ignores it. |
 | `zip_backups` | Downloaded zips to keep per fork in `<install_dir>\_zips\<id>`. `0` keeps none (default), a number keeps that many of the newest, `"all"` keeps every zip. The `z` key in the menu changes it. A lower number deletes the oldest extra zips right away. If the key is missing, no zips are kept. |
@@ -228,7 +271,8 @@ This file lists the forks that ship with the tool. To add a fork for yourself, u
 | `repo` | `owner/repository`. |
 | `host` | Forgejo only. For example `git.eden-emu.dev`. |
 | `workflow`, `branch` | Actions only. The workflow file name, and an optional branch. `null` means any branch. |
-| `include`, `exclude` | Regular expressions for the release asset (or artifact) name. The first asset that matches `include` and does not match `exclude` is used. |
+| `include`, `exclude` | Regular expressions for the release asset (or artifact) name. The first asset that matches `include` and does not match `exclude` is used. Names with `pgo` never count as the standard build. |
+| `pgo`, `pgo_include` | Optional. `"pgo": true` adds a PGO entry (`<id>-pgo`) that takes only names with `pgo`. It uses `pgo_include` when set, otherwise `include`, and `exclude` without its `pgo` part. |
 | `tags`, `release_exclude` | Optional. Regular expressions that skip releases by tag or by title, for example test branches or "experimental" builds. |
 | `exe` | Main executable. If you leave it out, the tool uses the first `.exe` it finds. |
 | `aliases` | Words that identify this fork in the wichforks game table. |
