@@ -15,7 +15,8 @@ It only installs ready-made release builds that the fork authors publish. It doe
 - Never replaces a fork while it is running.
 - Shows a "best fork per game" table from the wichforks guide, filtered by your GPU vendor (NVIDIA, AMD or Intel).
 - Lets you record your own results per game. Your choice overrides the guide on your machine.
-- Uses only built-in Windows tools: PowerShell 5.1 and `curl.exe`. There is nothing to install.
+- Works as a console menu or as a window with the same features: progress bars, version picker, links to each fork's GitHub page. The window can also keep the tool itself up to date. See [The window](#the-window).
+- Uses only built-in Windows tools: PowerShell 5.1, WPF and `curl.exe`. There is nothing to install.
 
 ## Requirements
 
@@ -36,6 +37,48 @@ It only installs ready-made release builds that the fork authors publish. It doe
 4. Type a fork number and press Enter. The tool downloads that fork, installs it in the `forks` folder and opens it.
 
 From then on, open the emulator through `ForkManager.cmd`. Each time it starts, it checks the installed forks and installs any new release before it shows the menu.
+
+Prefer a window? Double-click `ForkManager-GUI.cmd` instead. See [The window](#the-window).
+
+## The window
+
+`ForkManager-GUI.cmd` opens a dark-themed window that does everything the menu does. It needs nothing extra: it uses WPF, which ships with Windows. The window and the menu share the same settings, forks and notes, so you can switch between them at any time.
+
+| Page | What you can do |
+|---|---|
+| Forks | See every fork with its installed version and status. Select one to open, install, update, check, install a specific version, roll back, pin or unpin, delete the installed build, or remove a fork you added. Links go to the project page, its releases, the installed and latest release, and the install folder. **Add fork from link**, **Check for updates** and **Update all** are at the top. Installed builds outside your build type show in their own group. |
+| Games | The recommended fork per game, with the alternatives, the guide's evidence and your notes. **Play** opens the recommended fork, **Add a note** records a test result and can make that fork the default. **Sync the guide**, **Open GAMES.md**. |
+| NX2 switches | Your switches with their descriptions. Add one, paste several, or add all from the clipboard. Tick a box to turn a switch on or off; change its value or description, or delete it. |
+| Settings | What to check when the window opens, app updates, build type (MSVC, PGO, both), zip backups, GPU filter, update check interval, and the install folder. |
+| Activity log | Everything the tool reports, as the menu would print it. |
+
+Downloads and updates run in the background, so the window stays responsive. A progress bar shows the download in MB and percent; the status bar shows each step. One task runs at a time: the action buttons are disabled meanwhile, and closing the window asks first.
+
+When the window opens it syncs the guide and, like the menu, updates the installed builds (respecting `check_interval_minutes`). You can turn the fork check off in **Settings > When the window opens**. Builds of a newly selected build type are listed in a banner and download when you click **Update all**.
+
+**Install version** lists the fork's recent releases (or Actions builds) in a dropdown; **Custom...** takes any tag.
+
+All the work is done by `fork-manager.ps1`: `fork-manager-gui.ps1` loads it and calls its functions, so both always behave the same.
+
+### Updating the tool itself
+
+This project publishes no releases: the window follows the newest commit of its GitHub repository.
+
+- **Settings > App updates > Check now** compares your files with the newest commit (two or three API requests, no git needed) and lists what is new: the merged pull requests and commits since your version, and the files that change.
+- **Update now** downloads that commit and replaces the tool's files. `config.json`, `my-forks.json`, `GAMES.md`, `data\` and `forks\` are never touched. The window then offers to restart.
+- With **Back up the current version before updating** on (the default), the current files go to `data\app-backups\` first; the last 3 are kept. **Restore a previous version** puts one back, after backing up the current files, so a restore can be undone too.
+- If the folder is a git checkout, the update dialog warns first: updating overwrites the changed files with the update source, also local changes or another branch you have checked out there (they stay in the backup). With git, `git pull` is the usual way.
+- If `fork-manager.ps1` is older than the window needs (for example a restored backup from before the window existed), the window says so and offers to update instead of failing.
+- **Update source** chooses where updates come from: type `owner/repository` (or paste a github.com link) and optionally a branch, for example your own fork to try changes before they are merged. A link to a branch (`.../tree/name`) also sets the branch; an empty branch means the repository's default branch. **Save** first checks on GitHub that the repository and branch exist and contain `fork-manager.ps1`; **Use default** goes back to `Schroederr/nx-fork-manager`, `main`.
+
+Under **When the window opens** you choose whether the window checks the installed forks for updates (and installs them), and whether it looks for a new version of the tool. The tool check only shows a banner; it never installs by itself. Both are on by default.
+
+| `config.json` key | Default | Meaning |
+|---|---|---|
+| `check_forks_on_start` | `true` | Check and update installed forks when the window opens. |
+| `check_app_updates_on_start` | `true` | Look for a new version of the tool when the window opens. |
+| `app_backup` | `true` | Back up the current version before an app update. |
+| `app_repo`, `app_branch` | `Schroederr/nx-fork-manager`, `main` | Where app updates come from. Set them under **Update source**. |
 
 ## The menu
 
@@ -297,6 +340,8 @@ The first run creates this file. It is not tracked by git, so updates of this to
 | `zip_backups` | Downloaded zips to keep per fork in `<install_dir>\_zips\<id>`. `0` keeps none (default), a number keeps that many of the newest, `"all"` keeps every zip. The `z` key in the menu changes it. A lower number deletes the oldest extra zips right away. If the key is missing, no zips are kept. |
 | `nx2_switches` | Your NX2 switches, each `{ "name", "value", "enabled", "note" }` (`note` is the description). Easiest to change with `s` in the menu. See [Custom NX2 switches](#custom-nx2-switches). |
 
+The window adds a few keys of its own (`check_forks_on_start`, `check_app_updates_on_start`, `app_backup`, `app_repo`, `app_branch`): see [Updating the tool itself](#updating-the-tool-itself). The menu ignores them.
+
 ### forks.json (the fork catalog)
 
 This file lists the forks that ship with the tool. To add a fork for yourself, use `a` in the menu: it writes the same kind of entry to `my-forks.json`. To add a fork for everyone, add an entry here and open a pull request:
@@ -350,8 +395,10 @@ Most forks in the catalog are based on Eden/Eglantine and share the same user fo
 
 | Path | Tracked by git | Content |
 |---|---|---|
-| `ForkManager.cmd` | yes | Launcher. |
+| `ForkManager.cmd` | yes | Launcher for the menu. |
+| `ForkManager-GUI.cmd` | yes | Launcher for the window. |
 | `fork-manager.ps1` | yes | The tool. |
+| `fork-manager-gui.ps1` | yes | The window. It calls `fork-manager.ps1` for all the work. |
 | `forks.json` | yes | Fork catalog. |
 | `config.json` | no | Your settings. |
 | `my-forks.json` | no | Forks you added from links. |
@@ -363,8 +410,10 @@ Most forks in the catalog are based on Eden/Eglantine and share the same user fo
 | `forks\` | no | Installed forks (default `install_dir`). |
 | `forks\_zips\` | no | Zip backups, when `zip_backups` is not `0`. |
 | `forks\<id>\nx2_switches.original.txt` | no | The fork's `nx2_switches.txt` as shipped, when you use NX2 switches. |
+| `data\app-version.json` | no | The tool version (commit) the window last installed or confirmed. |
+| `data\app-backups\` | no | Backups of the tool's files from before an app update or restore (the last 3). |
 
-To update the tool itself, download the new `fork-manager.ps1`, `forks.json` and `ForkManager.cmd`, or run `git pull`. Your settings, notes and installed forks are not touched.
+To update the tool itself, use **Settings > App updates** in the window, run `git pull`, or download the new `fork-manager.ps1`, `fork-manager-gui.ps1`, `forks.json`, `ForkManager.cmd` and `ForkManager-GUI.cmd`. Your settings, notes and installed forks are not touched.
 
 ## Troubleshooting
 
@@ -373,7 +422,9 @@ To update the tool itself, download the new `fork-manager.ps1`, `forks.json` and
 - **"... is running. Close it and try again."**: close the emulator. The tool never replaces files in use.
 - **"Build ... has no valid Windows artifact"**: GitHub deletes Actions artifacts after a few days. Use a newer build.
 - **Windows SmartScreen or antivirus warnings**: these come from the emulator builds, not from this tool. Check the fork's release page if you are not sure.
-- **A fork update broke a game**: type `r` and the fork number to go back. The fork stays pinned until you unpin it with `p`.
+- **A fork update broke a game**: type `r` and the fork number to go back (in the window: select the fork, **Roll back**). The fork stays pinned until you unpin it with `p` (**Unpin**).
+- **The window does not open**: `ForkManager-GUI.cmd` hides the console. To see the error, open PowerShell in this folder and run `powershell -NoProfile -Sta -ExecutionPolicy Bypass -File .\fork-manager-gui.ps1`. The menu (`ForkManager.cmd`) keeps working either way.
+- **An app update broke something**: **Settings > App updates > Restore a previous version** puts the files from before the update back.
 
 ## Credits and disclaimer
 
